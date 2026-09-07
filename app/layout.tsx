@@ -5,7 +5,7 @@ import { Analytics } from '@vercel/analytics/next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'ClearLedger | Reconciliation workspace',
+  title: 'Mofdan Digitals | Reconciliation workspace',
   description: 'A secure workspace for comparing financial records and resolving exceptions.',
 }
 

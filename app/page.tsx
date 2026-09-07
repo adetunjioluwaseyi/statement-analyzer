@@ -102,7 +102,7 @@ export default function Home() {
         <header className="flex items-center justify-between border-b border-border/80 py-5">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-accent shadow-sm"><RefreshCw className="h-5 w-5" /></div>
-            <div><p className="text-sm font-semibold tracking-tight">ClearLedger</p><p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Reconciliation workspace</p></div>
+            <div><p className="text-sm font-semibold tracking-tight">Mofdan Digitals</p><p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Reconciliation workspace</p></div>
           </div>
           <div className="flex items-center gap-3 text-sm text-muted-foreground"><span className="hidden items-center gap-2 sm:flex"><span className="h-2 w-2 rounded-full bg-[#68a98e]" />Workspace ready</span><button className="rounded-full border border-border bg-white p-2.5 transition-colors hover:bg-muted" aria-label="Help and support"><CircleHelp className="h-4 w-4" /></button></div>
         </header>
@@ -131,7 +131,7 @@ export default function Home() {
               <TabsContent value="export" className="space-y-6 pt-5"><ExportSection comparisonResult={comparisonResult} headers={file1Data?.headers || []} /></TabsContent></Tabs>}
           </div>
         </main>
-        <footer className="flex flex-col gap-2 px-2 pt-6 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between"><span>ClearLedger · Reconciliation controls for modern finance teams</span><span className="flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5" /> Session-first processing <ArrowUpRight className="ml-1 h-3 w-3" /></span></footer>
+        <footer className="flex flex-col gap-2 px-2 pt-6 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between"><span>Mofdan Digitals · Reconciliation controls for modern finance teams</span><span className="flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5" /> Session-first processing <ArrowUpRight className="ml-1 h-3 w-3" /></span></footer>
       </div>
     </div>
   )
