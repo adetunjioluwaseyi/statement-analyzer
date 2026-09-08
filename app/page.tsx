@@ -68,10 +68,14 @@ export interface ComparisonResult {
 type Transaction = {
   values: string[];
   description: string;
+  category: string;
   debit: number;
   credit: number;
   balance: number;
 };
+type RiskMetric = { label: string; score: number; detail: string };
+type CategorySummary = { category: string; count: number; amount: number };
+type Anomaly = { title: string; detail: string; severity: "High" | "Medium" };
 type Analysis = {
   income: number;
   outflow: number;
@@ -83,7 +87,13 @@ type Analysis = {
   recurringCount: number;
   averageCredit: number;
   averageDebit: number;
+  averageBalance: number;
+  minimumBalance: number;
+  maximumBalance: number;
   expenseRatio: number;
+  debtBurden: number;
+  incomeStability: number;
+  liquidityScore: number;
   openingBalance: number;
   closingBalance: number;
   riskScore: number;
@@ -93,6 +103,9 @@ type Analysis = {
   transactions: Transaction[];
   findings: string[];
   recommendations: string[];
+  riskMetrics: RiskMetric[];
+  categoryBreakdown: CategorySummary[];
+  anomalies: Anomaly[];
   monthlyBreakdown: { month: string; income: number; outflow: number; net: number }[];
 };
 
@@ -117,6 +130,18 @@ function monthFrom(value: string | undefined) {
       ? new Date(Number(separated[3].length === 2 ? `20${separated[3]}` : separated[3]), Number(separated[2]) - 1, Number(separated[1]))
       : new Date(text);
   return Number.isNaN(date.getTime()) ? "Unclassified" : date.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+}
+
+function categorize(description: string) {
+  const text = description.toLowerCase();
+  if (/salary|payroll|wages|employer/.test(text)) return "Salary";
+  if (/transfer|bank to bank|instant|inward|outward/.test(text)) return "Transfer";
+  if (/atm|cash withdrawal|pos cash/.test(text)) return "ATM / Cash";
+  if (/pos|purchase|merchant|store|shopping/.test(text)) return "POS / Shopping";
+  if (/rent|utility|electric|water|internet|bill|subscription|netflix|airtime/.test(text)) return "Bills";
+  if (/loan|repayment|finance|installment|mortgage/.test(text)) return "Loan / Debt";
+  if (/fee|charge|commission/.test(text)) return "Fees";
+  return "Other";
 }
 
 function downloadFile(content: string, filename: string, type: string) {
@@ -206,6 +231,7 @@ export default function Home() {
       return {
         values,
         description,
+        category: categorize(description),
         debit: debit || (creditIndex < 0 && amount < 0 ? Math.abs(amount) : 0),
         credit: credit || (debitIndex < 0 && amount > 0 ? amount : 0),
         balance: balanceIndex >= 0 ? numberFrom(values[balanceIndex]) : 0,
@@ -239,6 +265,36 @@ export default function Home() {
     const debits = transactions
       .filter(({ debit }) => debit > 0)
       .map(({ debit }) => debit);
+    const balances = transactions
+      .map(({ balance }) => balance)
+      .filter((balance) => balance !== 0);
+    const averageBalance = balances.length
+      ? balances.reduce((sum, balance) => sum + balance, 0) / balances.length
+      : 0;
+    const minimumBalance = balances.length ? Math.min(...balances) : 0;
+    const maximumBalance = balances.length ? Math.max(...balances) : 0;
+    const categoryMap = new Map<string, CategorySummary>();
+    transactions.forEach((transaction) => {
+      const current = categoryMap.get(transaction.category) || {
+        category: transaction.category,
+        count: 0,
+        amount: 0,
+      };
+      current.count += 1;
+      current.amount += transaction.debit + transaction.credit;
+      categoryMap.set(transaction.category, current);
+    });
+    const categoryBreakdown = Array.from(categoryMap.values()).sort(
+      (a, b) => b.amount - a.amount,
+    );
+    const duplicateMap = new Map<string, number>();
+    transactions.forEach((transaction) => {
+      if (transaction.debit > 0) {
+        const key = `${transaction.description.toLowerCase()}|${transaction.debit}`;
+        duplicateMap.set(key, (duplicateMap.get(key) || 0) + 1);
+      }
+    });
+    const duplicateCount = Array.from(duplicateMap.values()).filter((count) => count > 1).length;
     const closingBalance =
       [...transactions].reverse().find(({ balance }) => balance !== 0)
         ?.balance || 0;
@@ -253,6 +309,10 @@ export default function Home() {
         ? firstBalance - firstTransaction.credit + firstTransaction.debit
         : 0);
     const expenseRatio = income > 0 ? (outflow / income) * 100 : 0;
+    const debtOutflow = transactions
+      .filter(({ category }) => category === "Loan / Debt")
+      .reduce((sum, transaction) => sum + transaction.debit, 0);
+    const debtBurden = income > 0 ? (debtOutflow / income) * 100 : 0;
     const monthlyMap = new Map<string, { month: string; income: number; outflow: number; net: number }>();
     transactions.forEach((transaction) => {
       const month = monthFrom(transaction.values[0]);
@@ -262,6 +322,33 @@ export default function Home() {
       current.net = current.income - current.outflow;
       monthlyMap.set(month, current);
     });
+    const monthlyIncomes = Array.from(monthlyMap.values()).map(({ income: monthIncome }) => monthIncome);
+    const averageMonthlyIncome = monthlyIncomes.length
+      ? monthlyIncomes.reduce((sum, value) => sum + value, 0) / monthlyIncomes.length
+      : 0;
+    const incomeStability = averageMonthlyIncome > 0
+      ? Math.max(0, Math.min(100, 100 - ((Math.max(...monthlyIncomes) - Math.min(...monthlyIncomes)) / averageMonthlyIncome) * 100))
+      : 0;
+    const liquidityScore = income > 0
+      ? Math.max(0, Math.min(100, (Math.max(0, minimumBalance) / income) * 100))
+      : 0;
+    const anomalies: Anomaly[] = [
+      ...(duplicateCount > 0
+        ? [{ title: "Potential duplicate debits", detail: `${duplicateCount} repeated description-and-amount pattern${duplicateCount === 1 ? "" : "s"} detected.`, severity: "High" as const }]
+        : []),
+      ...(largeTransactions > 0
+        ? [{ title: "Material transaction activity", detail: `${largeTransactions} debit${largeTransactions === 1 ? "" : "s"} exceeded ₦500,000.`, severity: "Medium" as const }]
+        : []),
+      ...(cashWithdrawalCount > 3
+        ? [{ title: "Elevated cash withdrawals", detail: `${cashWithdrawalCount} ATM or cash withdrawals need source-of-funds review.`, severity: "Medium" as const }]
+        : []),
+    ];
+    const riskMetrics: RiskMetric[] = [
+      { label: "Liquidity", score: Math.round(liquidityScore), detail: "Buffer from the lowest observed balance" },
+      { label: "Income stability", score: Math.round(incomeStability), detail: "Consistency across statement months" },
+      { label: "Debt burden", score: Math.max(0, Math.round(100 - Math.min(100, debtBurden))), detail: `${debtBurden.toFixed(1)}% of inflows tagged as debt repayment` },
+      { label: "Spending behaviour", score: Math.max(0, Math.round(100 - Math.min(100, expenseRatio))), detail: `${expenseRatio.toFixed(1)}% of inflows spent` },
+    ];
     const riskScore = Math.min(
       99,
       12 +
@@ -288,6 +375,7 @@ export default function Home() {
             "Transaction descriptions contain patterns that should be reviewed against supporting documents.",
           ]
         : []),
+      ...anomalies.map(({ title, detail }) => `${title}: ${detail}`),
     ];
     const recommendations =
       riskScore >= 60
@@ -322,7 +410,13 @@ export default function Home() {
       recurringCount,
       averageCredit: credits.length ? income / credits.length : 0,
       averageDebit: debits.length ? outflow / debits.length : 0,
+      averageBalance,
+      minimumBalance,
+      maximumBalance,
       expenseRatio,
+      debtBurden,
+      incomeStability,
+      liquidityScore,
       openingBalance,
       closingBalance,
       periodLabel,
@@ -342,6 +436,9 @@ export default function Home() {
       transactions,
       findings,
       recommendations,
+      riskMetrics,
+      categoryBreakdown,
+      anomalies,
       monthlyBreakdown: Array.from(monthlyMap.values()),
     };
   }, [statement]);
@@ -696,6 +793,86 @@ export default function Home() {
                     </CardContent>
                   </Card>
                 </div>
+                <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+                  <Card className="border-border/80 shadow-sm">
+                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-5">
+                      <CardTitle>Transaction categories</CardTitle>
+                      <CardDescription>Detected from transaction descriptions and narration patterns.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4 pt-6">
+                      {analysis.categoryBreakdown.map((category) => {
+                        const share = analysis.outflow + analysis.income > 0
+                          ? (category.amount / (analysis.outflow + analysis.income)) * 100
+                          : 0;
+                        return (
+                          <div key={category.category}>
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="font-medium">{category.category}</span>
+                              <span className="text-muted-foreground">{category.count} · {money.format(category.amount)}</span>
+                            </div>
+                            <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#eef3f0]">
+                              <div className="h-full rounded-full bg-[#2e8b80]" style={{ width: `${Math.max(3, share)}%` }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </CardContent>
+                  </Card>
+                  <Card className="border-border/80 shadow-sm">
+                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-5">
+                      <CardTitle>Risk scorecard</CardTitle>
+                      <CardDescription>Four dimensions for a consistent financial assessment.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
+                      {analysis.riskMetrics.map((metric) => (
+                        <div key={metric.label} className="rounded-lg border border-border/80 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-sm font-medium">{metric.label}</span>
+                            <span className={`text-lg font-semibold ${metric.score < 40 ? "text-[#c85b4c]" : metric.score < 70 ? "text-[#d68b46]" : "text-[#2e8b80]"}`}>{metric.score}</span>
+                          </div>
+                          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#eef3f0]">
+                            <div className={`h-full rounded-full ${metric.score < 40 ? "bg-[#c85b4c]" : metric.score < 70 ? "bg-[#d68b46]" : "bg-[#2e8b80]"}`} style={{ width: `${metric.score}%` }} />
+                          </div>
+                          <p className="mt-2 text-xs text-muted-foreground">{metric.detail}</p>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                </div>
+                <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
+                  <Card className="border-border/80 shadow-sm">
+                    <CardHeader>
+                      <CardTitle>Balance health</CardTitle>
+                      <CardDescription>Observed running-balance range.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid grid-cols-3 gap-3">
+                      <Signal label="Average" value={money.format(analysis.averageBalance)} detail="Observed balance" />
+                      <Signal label="Minimum" value={money.format(analysis.minimumBalance)} detail="Lowest point" />
+                      <Signal label="Maximum" value={money.format(analysis.maximumBalance)} detail="Highest point" />
+                    </CardContent>
+                  </Card>
+                  <Card className="border-border/80 shadow-sm">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-[#d68b46]" /> Fraud and anomaly queue</CardTitle>
+                      <CardDescription>Rule-based signals requiring human review, not proof of fraud.</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      {analysis.anomalies.length ? (
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          {analysis.anomalies.map((anomaly) => (
+                            <div key={anomaly.title} className="rounded-lg border border-[#ead9c2] bg-[#fffaf2] p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="text-sm font-semibold">{anomaly.title}</p>
+                                <Badge variant={anomaly.severity === "High" ? "destructive" : "outline"}>{anomaly.severity}</Badge>
+                              </div>
+                              <p className="mt-2 text-xs leading-5 text-muted-foreground">{anomaly.detail}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : <p className="text-sm text-muted-foreground">No duplicate or high-signal suspicious pattern was detected.</p>}
+                    </CardContent>
+                  </Card>
+                </div>
                 <div className="grid gap-6 lg:grid-cols-2">
                   <Card className="border-border/80 shadow-sm">
                     <CardHeader>
@@ -760,7 +937,7 @@ export default function Home() {
                     <table className="w-full min-w-[680px] text-left text-sm">
                       <thead>
                         <tr className="border-b border-border text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                          {statement.headers.map((header) => (
+                          {statement!.headers.map((header) => (
                             <th
                               key={header}
                               className="px-3 pb-3 font-semibold"
@@ -771,12 +948,12 @@ export default function Home() {
                         </tr>
                       </thead>
                       <tbody>
-                        {statement.rows.slice(0, 12).map((row, rowIndex) => (
+                        {statement!.rows.slice(0, 12).map((row, rowIndex) => (
                           <tr
                             key={rowIndex}
                             className="border-b border-border/70 last:border-0"
                           >
-                            {statement.headers.map((_, cellIndex) => (
+                            {statement!.headers.map((_, cellIndex) => (
                               <td
                                 key={cellIndex}
                                 className="px-3 py-3 font-mono text-xs"
