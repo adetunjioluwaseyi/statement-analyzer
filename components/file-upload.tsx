@@ -68,7 +68,10 @@ function extractPdfMetadata(lines: string[]) {
   const holderLine = lines.find((line) => /^[A-Z][A-Z .'-]{4,}$/.test(line.trim()))
   if (holderLine) metadata.accountHolder = holderLine.trim()
   const openingLine = lines.find((line) => /opening balance|balance brought forward|brought forward|balance\s*(b\/f|bf)/i.test(line))
-  const openingAmount = openingLine?.match(amountPattern)?.at(-1)
+  const openingAmounts = openingLine?.match(amountPattern)
+  const openingAmount = openingAmounts && openingAmounts.length > 0
+    ? openingAmounts[openingAmounts.length - 1]
+    : undefined
   if (openingAmount) metadata.openingBalance = numberFrom(openingAmount)
   const accountTypeLine = lines.find((line) => /account type/i.test(line))
   if (accountTypeLine) metadata.accountType = accountTypeLine.replace(/account type:?/i, "").trim()
