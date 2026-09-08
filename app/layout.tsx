@@ -5,8 +5,8 @@ import { Analytics } from '@vercel/analytics/next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Mofdan Digitals | Reconciliation workspace',
-  description: 'A secure workspace for comparing financial records and resolving exceptions.',
+  title: 'Mofdan Digitals | Bank statement intelligence',
+  description: 'Turn bank statements into cash-flow, fraud, and lending decision signals.',
 }
 
 export default function RootLayout({
