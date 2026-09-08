@@ -8,9 +8,9 @@ import { Upload, FileText, AlertCircle } from "lucide-react"
 import type { CSVData } from "@/app/page"
 import Papa from "papaparse"
 import * as XLSX from "xlsx"
-import { GlobalWorkerOptions, getDocument, version as pdfjsVersion } from "pdfjs-dist/legacy/build/pdf.mjs"
+import { GlobalWorkerOptions, getDocument, version as pdfjsVersion } from "pdfjs-dist/build/pdf.js"
 
-GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsVersion}/pdf.worker.min.mjs`
+GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsVersion}/pdf.worker.min.js`
 
 interface FileUploadProps {
   onFileUpload: (data: CSVData) => void

@@ -9,6 +9,17 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  webpack: (config) => {
+    config.resolve.fallback = {
+      ...config.resolve.fallback,
+      canvas: false,
+    }
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      canvas: false,
+    }
+    return config
+  },
 }
 
 export default nextConfig
