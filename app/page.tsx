@@ -1,7 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FileUpload } from "@/components/file-upload";
+import { CreditMemoDialog } from "@/components/credit-memo-dialog";
+import { useAuth } from "@/context/auth-context";
+import { UserNav } from "@/components/user-nav";
+import { AdminDashboard } from "@/components/admin-dashboard";
+import { UserHistoryDialog } from "@/components/user-history-dialog";
+import { AuthModal } from "@/components/auth-modal";
+import { AuthGateway } from "@/components/auth-gateway";
+import { SuspendedBanner } from "@/components/suspended-banner";
+import { recordStatementUpload } from "@/lib/admin-service";
+import { toast } from "sonner";
 import {
   Bar,
   BarChart,
@@ -22,28 +32,71 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import {
   AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
   Banknote,
   Check,
-  CircleHelp,
   Download,
+  FileDown,
   FileJson,
   FileText,
-  LockKeyhole,
+  Printer,
   RefreshCw,
   ShieldCheck,
   TrendingUp,
   Upload,
   WalletCards,
+  Building,
+  Scale,
+  Dices,
+  Receipt,
+  AlertCircle,
+  EyeOff,
+  Eye,
+  Plus,
+  Wallet,
+  Calendar,
 } from "lucide-react";
+import {
+  CURRENCIES,
+  formatMoney,
+  SupportedCurrency,
+} from "@/lib/currencies";
+import {
+  categorizeTransaction,
+  CategoryType,
+} from "@/lib/categorizer";
+import {
+  runStatementForensics,
+} from "@/lib/statement-forensics";
+import {
+  calculateUnderwriting,
+} from "@/lib/underwriting";
+import {
+  computeMonthlyBreakdown,
+  computeWeeklyBreakdown,
+} from "@/lib/time-breakdown";
+import {
+  openPrintableReport,
+  downloadOfflineReport,
+} from "@/lib/report-export";
 
 export interface CSVData {
   headers: string[];
   rows: string[][];
   fileName: string;
   metadata?: {
+    accountNumber?: string;
     periodStart?: string;
     periodEnd?: string;
     openingBalance?: number;
@@ -52,96 +105,34 @@ export interface CSVData {
   };
 }
 
-export interface ComparisonResult {
-  missingInFile1: string[][];
-  missingInFile2: string[][];
-  summary: {
-    file1Count: number;
-    file2Count: number;
-    file1Sum?: number;
-    file2Sum?: number;
-    missingInFile1Count: number;
-    missingInFile2Count: number;
-  };
-}
-
 type Transaction = {
+  index: number;
+  date: string;
   values: string[];
   description: string;
-  category: string;
+  category: CategoryType;
   debit: number;
   credit: number;
   balance: number;
-};
-type RiskMetric = { label: string; score: number; detail: string };
-type CategorySummary = { category: string; count: number; amount: number };
-type Anomaly = { title: string; detail: string; severity: "High" | "Medium" };
-type Analysis = {
-  income: number;
-  outflow: number;
-  net: number;
-  transactionCount: number;
-  largeTransactions: number;
-  cashWithdrawalCount: number;
-  transferCount: number;
-  recurringCount: number;
-  averageCredit: number;
-  averageDebit: number;
-  averageBalance: number;
-  minimumBalance: number;
-  maximumBalance: number;
-  expenseRatio: number;
-  debtBurden: number;
-  incomeStability: number;
-  liquidityScore: number;
-  openingBalance: number;
-  closingBalance: number;
-  riskScore: number;
-  periodLabel: string;
-  riskLabel: string;
-  riskNote: string;
-  transactions: Transaction[];
-  findings: string[];
-  recommendations: string[];
-  riskMetrics: RiskMetric[];
-  categoryBreakdown: CategorySummary[];
-  anomalies: Anomaly[];
-  monthlyBreakdown: { month: string; income: number; outflow: number; net: number }[];
+  isGambling: boolean;
+  isPaydayLoan: boolean;
+  isPenaltyOrNSF: boolean;
+  isCrypto: boolean;
+  isSalary: boolean;
+  riskFlag?: string;
 };
 
-const money = new Intl.NumberFormat("en-NG", {
-  style: "currency",
-  currency: "NGN",
-  maximumFractionDigits: 0,
-});
+type CategorySummary = { category: CategoryType; count: number; amount: number };
 
-function numberFrom(value: string | undefined) {
-  const parsed = Number.parseFloat((value || "").replace(/[^\d.-]/g, ""));
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function monthFrom(value: string | undefined) {
-  const text = (value || "").trim();
-  const compact = text.match(/^(\d{1,2})\s*([A-Za-z]{3,9})\s*(\d{2,4})/);
-  const separated = text.match(/^(\d{1,2})[\s/-](\d{1,2})[\s/-](\d{2,4})/);
-  const date = compact
-    ? new Date(`${compact[1]} ${compact[2]} ${compact[3]}`)
-    : separated
-      ? new Date(Number(separated[3].length === 2 ? `20${separated[3]}` : separated[3]), Number(separated[2]) - 1, Number(separated[1]))
-      : new Date(text);
-  return Number.isNaN(date.getTime()) ? "Unclassified" : date.toLocaleDateString("en-US", { month: "short", year: "numeric" });
-}
-
-function categorize(description: string) {
-  const text = description.toLowerCase();
-  if (/salary|payroll|wages|employer/.test(text)) return "Salary";
-  if (/transfer|bank to bank|instant|inward|outward/.test(text)) return "Transfer";
-  if (/atm|cash withdrawal|pos cash/.test(text)) return "ATM / Cash";
-  if (/pos|purchase|merchant|store|shopping/.test(text)) return "POS / Shopping";
-  if (/rent|utility|electric|water|internet|bill|subscription|netflix|airtime/.test(text)) return "Bills";
-  if (/loan|repayment|finance|installment|mortgage/.test(text)) return "Loan / Debt";
-  if (/fee|charge|commission/.test(text)) return "Fees";
-  return "Other";
+function numberFrom(value: string | undefined): number {
+  if (!value) return 0;
+  const raw = String(value).trim();
+  if (!raw) return 0;
+  if (/[a-zA-Z]/.test(raw)) return 0;
+  const isNegative = /^\s*\(.+\)\s*$/.test(raw) || /^\s*-/.test(raw);
+  const parsed = Number.parseFloat(raw.replace(/[^\d.-]/g, ""));
+  if (!Number.isFinite(parsed) || Math.abs(parsed) > 10_000_000_000_000) return 0;
+  return isNegative ? -Math.abs(parsed) : parsed;
 }
 
 function downloadFile(content: string, filename: string, type: string) {
@@ -166,7 +157,7 @@ function Metric({
   icon: React.ReactNode;
 }) {
   return (
-    <Card className="border-border/80 shadow-sm">
+    <Card className="border-border/80 shadow-xs transition-all hover:border-primary/40">
       <CardContent className="p-5">
         <div className="flex items-start justify-between">
           <div>
@@ -202,769 +193,1874 @@ function Signal({
 }
 
 export default function Home() {
+  const { user, profile, loading, isAdmin, isSuspended, refreshProfile } = useAuth();
   const [statement, setStatement] = useState<CSVData | null>(null);
-  const analysis = useMemo<Analysis | null>(() => {
+  const [currency, setCurrency] = useState<SupportedCurrency>("NGN");
+  const [isCreditMemoOpen, setIsCreditMemoOpen] = useState(false);
+  const [isPiiMasked, setIsPiiMasked] = useState(false);
+  const [timelineTab, setTimelineTab] = useState<"insight" | "monthly" | "weekly" | "chart">("insight");
+  const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState(false);
+  const [isUserHistoryOpen, setIsUserHistoryOpen] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [lastLoggedKey, setLastLoggedKey] = useState<string | null>(null);
+
+  // Loan calculator interactive state
+  const [loanTenureMonths, setLoanTenureMonths] = useState<number>(3);
+  const [riskPolicy, setRiskPolicy] = useState<"conservative" | "standard" | "aggressive">("standard");
+
+  const analysis = useMemo(() => {
     if (!statement) return null;
-    const headers = statement.headers.map((header) => header.toLowerCase());
-    const descriptionIndex = headers.findIndex((header) =>
-      /description|narration|details|memo|particular/.test(header),
+
+    const headers = statement.headers.map((header) => header.toLowerCase().trim());
+
+    // 1. Identify Date column
+    let dateIndex = headers.findIndex((h) =>
+      /^(trans_?date|value_?date|posting_?date|txn_?date|date|time)$/i.test(h)
     );
-    const debitIndex = headers.findIndex((header) =>
-      /debit|withdrawal|outflow|spent/.test(header),
+    if (dateIndex === -1) {
+      dateIndex = headers.findIndex((h) => /\b(date|time)\b/i.test(h));
+    }
+
+    // 2. Identify Description / Narration column
+    let descriptionIndex = headers.findIndex((h) =>
+      /^(narration|description|particulars?|details?|memo|remarks?|trans(action)?_?(desc|details?))$/i.test(h)
     );
-    const creditIndex = headers.findIndex((header) =>
-      /credit|deposit|inflow|received/.test(header),
+    if (descriptionIndex === -1) {
+      descriptionIndex = headers.findIndex((h) => /\b(desc|narrat|particular|memo|detail|remark)\b/i.test(h));
+    }
+
+    // Helper: is this column an ID, reference, account, channel, or already assigned?
+    const isMetaOrTextCol = (idx: number) => {
+      if (idx === dateIndex || idx === descriptionIndex) return true;
+      const h = headers[idx] || "";
+      return (
+        /^(ref|reference|txn_?id|trans_?id|session_?id|session|account|nuban|chq|cheque|channel|slip|type|status|user|category)$/i.test(h) ||
+        /\b(reference|session|account_?no|nuban|cheque|chq)\b/i.test(h)
+      );
+    };
+
+    // 3. Identify Debit column
+    let debitIndex = headers.findIndex(
+      (h, idx) =>
+        !isMetaOrTextCol(idx) &&
+        /^(debit|dr\.?|withdrawal|outflow|paid_?out|debit_?amount|spent)$/i.test(h)
     );
-    const balanceIndex = headers.findIndex((header) =>
-      /balance|running balance|closing/.test(header),
+    if (debitIndex === -1) {
+      debitIndex = headers.findIndex(
+        (h, idx) =>
+          !isMetaOrTextCol(idx) &&
+          /\b(debit|dr|withdrawal|outflow)\b/i.test(h)
+      );
+    }
+
+    // 4. Identify Credit column (CRITICAL: must NOT match description or words with 'cr' like micro, cross, description!)
+    let creditIndex = headers.findIndex(
+      (h, idx) =>
+        !isMetaOrTextCol(idx) &&
+        idx !== debitIndex &&
+        /^(credit|cr\.?|deposit|inflow|paid_?in|credit_?amount|received)$/i.test(h)
     );
-    const amountIndex = headers.findIndex((header) =>
-      /amount|value|transaction amount|transaction_value/.test(header),
+    if (creditIndex === -1) {
+      creditIndex = headers.findIndex(
+        (h, idx) =>
+          !isMetaOrTextCol(idx) &&
+          idx !== debitIndex &&
+          /\b(credit|cr|deposit|inflow)\b/i.test(h)
+      );
+    }
+
+    // Guard: ensure creditIndex is not targeting a text narration column
+    if (creditIndex >= 0 && statement.rows.length > 0) {
+      const sampleTextCount = statement.rows
+        .slice(0, 10)
+        .filter((r) => /[a-zA-Z]{3,}/.test(r[creditIndex] || "")).length;
+      if (sampleTextCount > 5) {
+        creditIndex = -1;
+      }
+    }
+
+    // 5. Identify Balance column
+    let balanceIndex = headers.findIndex(
+      (h, idx) =>
+        !isMetaOrTextCol(idx) &&
+        idx !== debitIndex &&
+        idx !== creditIndex &&
+        /^(balance|bal\.?|running_?balance|closing_?balance|ledger_?balance|avail_?balance)$/i.test(h)
     );
-    const transactions = statement.rows.map((values) => {
+    if (balanceIndex === -1) {
+      balanceIndex = headers.findIndex(
+        (h, idx) =>
+          !isMetaOrTextCol(idx) &&
+          idx !== debitIndex &&
+          idx !== creditIndex &&
+          /\b(balance|bal)\b/i.test(h)
+      );
+    }
+
+    // 6. Identify Single Amount column if separate debit/credit don't exist
+    const amountIndex = headers.findIndex(
+      (h, idx) =>
+        !isMetaOrTextCol(idx) &&
+        idx !== debitIndex &&
+        idx !== creditIndex &&
+        idx !== balanceIndex &&
+        /^(amount|value|transaction_?amount|txn_?amount)$/i.test(h)
+    );
+
+    const transactions: Transaction[] = statement.rows.map((values, index) => {
+      const rawDate = values[dateIndex >= 0 ? dateIndex : 0] || "";
       const description =
-        values[descriptionIndex >= 0 ? descriptionIndex : 0] ||
-        "Unlabelled transaction";
+        values[descriptionIndex >= 0 ? descriptionIndex : 1] ||
+        "Statement transaction";
       const debit = debitIndex >= 0 ? numberFrom(values[debitIndex]) : 0;
       const credit = creditIndex >= 0 ? numberFrom(values[creditIndex]) : 0;
       const amount = amountIndex >= 0 ? numberFrom(values[amountIndex]) : 0;
+      const actualDebit =
+        debit || (creditIndex < 0 && amount < 0 ? Math.abs(amount) : 0);
+      const actualCredit =
+        credit || (debitIndex < 0 && amount > 0 ? amount : 0);
+      const balance =
+        balanceIndex >= 0 ? numberFrom(values[balanceIndex]) : 0;
+
+      const categoryDetails = categorizeTransaction(
+        description,
+        actualDebit,
+        actualCredit
+      );
+
       return {
+        index,
+        date: rawDate,
         values,
         description,
-        category: categorize(description),
-        debit: debit || (creditIndex < 0 && amount < 0 ? Math.abs(amount) : 0),
-        credit: credit || (debitIndex < 0 && amount > 0 ? amount : 0),
-        balance: balanceIndex >= 0 ? numberFrom(values[balanceIndex]) : 0,
+        category: categoryDetails.category,
+        debit: actualDebit,
+        credit: actualCredit,
+        balance,
+        isGambling: categoryDetails.isGambling,
+        isPaydayLoan: categoryDetails.isPaydayLoan,
+        isPenaltyOrNSF: categoryDetails.isPenaltyOrNSF,
+        isCrypto: categoryDetails.isCrypto,
+        isSalary: categoryDetails.isSalary,
+        riskFlag: categoryDetails.riskFlag,
       };
     });
-    const income = transactions.reduce(
-      (sum, transaction) => sum + transaction.credit,
-      0,
-    );
-    const outflow = transactions.reduce(
-      (sum, transaction) => sum + transaction.debit,
-      0,
-    );
-    const largeTransactions = transactions.filter(
-      ({ debit }) => debit > 500000,
-    ).length;
-    const cashWithdrawalCount = transactions.filter(({ description }) =>
-      /atm|cash withdrawal|pos cash/.test(description.toLowerCase()),
-    ).length;
-    const transferCount = transactions.filter(({ description }) =>
-      /transfer|bank to bank|instant/.test(description.toLowerCase()),
-    ).length;
-    const recurringCount = transactions.filter(({ description }) =>
-      /salary|rent|subscription|netflix|airtime|utility|bill/.test(
-        description.toLowerCase(),
-      ),
-    ).length;
-    const credits = transactions
-      .filter(({ credit }) => credit > 0)
-      .map(({ credit }) => credit);
-    const debits = transactions
-      .filter(({ debit }) => debit > 0)
-      .map(({ debit }) => debit);
+
+    const income = transactions.reduce((sum, tx) => sum + tx.credit, 0);
+    const outflow = transactions.reduce((sum, tx) => sum + tx.debit, 0);
+    const net = income - outflow;
+
     const balances = transactions
-      .map(({ balance }) => balance)
-      .filter((balance) => balance !== 0);
+      .map((tx) => tx.balance)
+      .filter((b) => b !== 0);
     const averageBalance = balances.length
-      ? balances.reduce((sum, balance) => sum + balance, 0) / balances.length
+      ? balances.reduce((sum, b) => sum + b, 0) / balances.length
       : 0;
     const minimumBalance = balances.length ? Math.min(...balances) : 0;
     const maximumBalance = balances.length ? Math.max(...balances) : 0;
-    const categoryMap = new Map<string, CategorySummary>();
-    transactions.forEach((transaction) => {
-      const current = categoryMap.get(transaction.category) || {
-        category: transaction.category,
-        count: 0,
-        amount: 0,
-      };
-      current.count += 1;
-      current.amount += transaction.debit + transaction.credit;
-      categoryMap.set(transaction.category, current);
-    });
-    const categoryBreakdown = Array.from(categoryMap.values()).sort(
-      (a, b) => b.amount - a.amount,
-    );
-    const duplicateMap = new Map<string, number>();
-    transactions.forEach((transaction) => {
-      if (transaction.debit > 0) {
-        const key = `${transaction.description.toLowerCase()}|${transaction.debit}`;
-        duplicateMap.set(key, (duplicateMap.get(key) || 0) + 1);
-      }
-    });
-    const duplicateCount = Array.from(duplicateMap.values()).filter((count) => count > 1).length;
+
     const closingBalance =
-      [...transactions].reverse().find(({ balance }) => balance !== 0)
-        ?.balance || 0;
+      [...transactions].reverse().find((tx) => tx.balance !== 0)?.balance || 0;
     const firstBalance =
-      transactions.find(({ balance }) => balance !== 0)?.balance || 0;
+      transactions.find((tx) => tx.balance !== 0)?.balance || 0;
     const firstTransaction = transactions.find(
-      ({ debit, credit }) => debit > 0 || credit > 0,
+      (tx) => tx.debit > 0 || tx.credit > 0
     );
     const openingBalance =
       statement.metadata?.openingBalance ??
       (firstTransaction
         ? firstBalance - firstTransaction.credit + firstTransaction.debit
         : 0);
-    const expenseRatio = income > 0 ? (outflow / income) * 100 : 0;
-    const debtOutflow = transactions
-      .filter(({ category }) => category === "Loan / Debt")
-      .reduce((sum, transaction) => sum + transaction.debit, 0);
-    const debtBurden = income > 0 ? (debtOutflow / income) * 100 : 0;
-    const monthlyMap = new Map<string, { month: string; income: number; outflow: number; net: number }>();
-    transactions.forEach((transaction) => {
-      const month = monthFrom(transaction.values[0]);
-      const current = monthlyMap.get(month) || { month, income: 0, outflow: 0, net: 0 };
-      current.income += transaction.credit;
-      current.outflow += transaction.debit;
-      current.net = current.income - current.outflow;
-      monthlyMap.set(month, current);
+
+    const netBalanceDelta = closingBalance - openingBalance;
+    const balanceGrowthRate =
+      openingBalance > 0 ? (netBalanceDelta / openingBalance) * 100 : 0;
+
+    // Time breakdowns: Monthly and Weekly
+    const breakdownRawTxs = transactions.map((t) => ({
+      date: t.date,
+      credit: t.credit,
+      debit: t.debit,
+      balance: t.balance,
+    }));
+    const monthlyBreakdown = computeMonthlyBreakdown(breakdownRawTxs, openingBalance);
+    const weeklyBreakdown = computeWeeklyBreakdown(breakdownRawTxs, openingBalance);
+
+    // Category breakdown
+    const categoryMap = new Map<CategoryType, CategorySummary>();
+    transactions.forEach((tx) => {
+      const current = categoryMap.get(tx.category) || {
+        category: tx.category,
+        count: 0,
+        amount: 0,
+      };
+      current.count += 1;
+      current.amount += tx.debit + tx.credit;
+      categoryMap.set(tx.category, current);
     });
-    const monthlyIncomes = Array.from(monthlyMap.values()).map(({ income: monthIncome }) => monthIncome);
-    const averageMonthlyIncome = monthlyIncomes.length
-      ? monthlyIncomes.reduce((sum, value) => sum + value, 0) / monthlyIncomes.length
-      : 0;
-    const incomeStability = averageMonthlyIncome > 0
-      ? Math.max(0, Math.min(100, 100 - ((Math.max(...monthlyIncomes) - Math.min(...monthlyIncomes)) / averageMonthlyIncome) * 100))
-      : 0;
-    const liquidityScore = income > 0
-      ? Math.max(0, Math.min(100, (Math.max(0, minimumBalance) / income) * 100))
-      : 0;
-    const anomalies: Anomaly[] = [
-      ...(duplicateCount > 0
-        ? [{ title: "Potential duplicate debits", detail: `${duplicateCount} repeated description-and-amount pattern${duplicateCount === 1 ? "" : "s"} detected.`, severity: "High" as const }]
-        : []),
-      ...(largeTransactions > 0
-        ? [{ title: "Material transaction activity", detail: `${largeTransactions} debit${largeTransactions === 1 ? "" : "s"} exceeded ₦500,000.`, severity: "Medium" as const }]
-        : []),
-      ...(cashWithdrawalCount > 3
-        ? [{ title: "Elevated cash withdrawals", detail: `${cashWithdrawalCount} ATM or cash withdrawals need source-of-funds review.`, severity: "Medium" as const }]
-        : []),
-    ];
-    const riskMetrics: RiskMetric[] = [
-      { label: "Liquidity", score: Math.round(liquidityScore), detail: "Buffer from the lowest observed balance" },
-      { label: "Income stability", score: Math.round(incomeStability), detail: "Consistency across statement months" },
-      { label: "Debt burden", score: Math.max(0, Math.round(100 - Math.min(100, debtBurden))), detail: `${debtBurden.toFixed(1)}% of inflows tagged as debt repayment` },
-      { label: "Spending behaviour", score: Math.max(0, Math.round(100 - Math.min(100, expenseRatio))), detail: `${expenseRatio.toFixed(1)}% of inflows spent` },
-    ];
-    const riskScore = Math.min(
-      99,
-      12 +
-        largeTransactions * 16 +
-        cashWithdrawalCount * 8 +
-        (expenseRatio > 100 ? 25 : 0),
+    const categoryBreakdown = Array.from(categoryMap.values()).sort(
+      (a, b) => b.amount - a.amount
     );
-    const findings = [
-      ...(expenseRatio > 100
-        ? ["Outflows exceed detected inflows during the statement period."]
-        : []),
-      ...(largeTransactions > 0
-        ? [
-            `${largeTransactions} debit transaction${largeTransactions === 1 ? "" : "s"} exceeded ₦500,000.`,
-          ]
-        : []),
-      ...(cashWithdrawalCount > 3
-        ? [
-            `${cashWithdrawalCount} cash withdrawals may require source-of-funds validation.`,
-          ]
-        : []),
-      ...(findingsPlaceholder(transactions)
-        ? [
-            "Transaction descriptions contain patterns that should be reviewed against supporting documents.",
-          ]
-        : []),
-      ...anomalies.map(({ title, detail }) => `${title}: ${detail}`),
-    ];
-    const recommendations =
-      riskScore >= 60
-        ? [
-            "Place the case in enhanced review before approval.",
-            "Request supporting documents for material debits and cash activity.",
-            "Validate income consistency against external evidence.",
-          ]
-        : riskScore >= 35
-          ? [
-              "Verify unusual transfers and cash activity before a decision.",
-              "Review affordability using verified recurring income.",
-              "Retain this report with the case file for auditability.",
-            ]
-          : [
-              "No immediate high-signal exception was detected.",
-              "Confirm statement authenticity and period coverage.",
-              "Use verified income and obligations in the final decision.",
-            ];
+
+    // 1. Forensics & Math Integrity Engine
+    const forensicItems = transactions.map((tx) => ({
+      index: tx.index,
+      date: tx.date,
+      description: tx.description,
+      credit: tx.credit,
+      debit: tx.debit,
+      balance: tx.balance,
+    }));
+    const forensics = runStatementForensics(forensicItems, openingBalance);
+
+    // 2. Underwriting & Credit Risk Engine
+    const underwriting = calculateUnderwriting({
+      income,
+      outflow,
+      net,
+      openingBalance,
+      closingBalance,
+      minimumBalance,
+      averageBalance,
+      transactions,
+      monthlyBreakdown,
+      mathIntegrityScore: forensics.mathIntegrityScore,
+    });
+
+    const expenseRatio = income > 0 ? (outflow / income) * 100 : 0;
     const periodLabel =
       statement.metadata?.periodStart && statement.metadata?.periodEnd
         ? `${statement.metadata.periodStart} to ${statement.metadata.periodEnd}`
-        : "Period unavailable from source file";
+        : monthlyBreakdown.length > 0
+        ? `${monthlyBreakdown[0].month} - ${monthlyBreakdown[monthlyBreakdown.length - 1].month}`
+        : "Full Statement Scope";
+
+    // Risk scorecard dimensions (0 - 100)
+    const riskMetrics = [
+      {
+        label: "Math Integrity",
+        score: forensics.mathIntegrityScore,
+        detail: forensics.forgeryRiskSummary,
+      },
+      {
+        label: "Debt Capacity",
+        score: Math.max(0, Math.round(100 - underwriting.dtiRatio)),
+        detail: `DTI: ${underwriting.dtiRatio}% · FOIR: ${underwriting.foirRatio}%`,
+      },
+      {
+        label: "Cash Runway",
+        score: Math.min(100, Math.round((underwriting.cashRunwayDays / 60) * 100)),
+        detail: `${underwriting.cashRunwayDays} days of survival at current outflows`,
+      },
+      {
+        label: "Behavioral Cleanliness",
+        score: Math.max(
+          0,
+          Math.round(
+            100 -
+              underwriting.gamblingExposure.percentOfOutflow * 3 -
+              underwriting.paydayLoanExposure.appCount * 15 -
+              underwriting.nsfAndPenalties.count * 20
+          )
+        ),
+        detail: `${underwriting.gamblingExposure.percentOfOutflow}% gambling · ${underwriting.paydayLoanExposure.appCount} payday apps`,
+      },
+    ];
+
     return {
       income,
       outflow,
-      net: income - outflow,
-      transactionCount: transactions.length,
-      largeTransactions,
-      cashWithdrawalCount,
-      transferCount,
-      recurringCount,
-      averageCredit: credits.length ? income / credits.length : 0,
-      averageDebit: debits.length ? outflow / debits.length : 0,
+      net,
+      expenseRatio,
+      openingBalance,
+      closingBalance,
+      netBalanceDelta,
+      balanceGrowthRate,
       averageBalance,
       minimumBalance,
       maximumBalance,
-      expenseRatio,
-      debtBurden,
-      incomeStability,
-      liquidityScore,
-      openingBalance,
-      closingBalance,
       periodLabel,
-      riskScore,
-      riskLabel:
-        riskScore >= 60
-          ? "Needs review"
-          : riskScore >= 35
-            ? "Watchlist"
-            : "Low concern",
-      riskNote:
-        riskScore >= 60
-          ? "Several patterns need an investigator's attention before a lending decision."
-          : riskScore >= 35
-            ? "Some activity is unusual for a first-pass review. Validate source documents."
-            : "No high-signal anomalies were detected by the current rules.",
       transactions,
-      findings,
-      recommendations,
-      riskMetrics,
+      monthlyBreakdown,
+      weeklyBreakdown,
       categoryBreakdown,
-      anomalies,
-      monthlyBreakdown: Array.from(monthlyMap.values()),
+      forensics,
+      underwriting,
+      riskMetrics,
     };
   }, [statement]);
 
-  function findingsPlaceholder(transactions: Transaction[]) {
-    return transactions.some(({ description }) =>
-      /loan|bet|gaming|crypto|cash/i.test(description),
-    );
-  }
+  // Handle appending additional statement files (e.g. Month 2, Month 3 or 2nd account)
+  const handleAppendStatement = (newStmt: CSVData) => {
+    if (!statement) {
+      setStatement(newStmt);
+      return;
+    }
+    setStatement({
+      ...statement,
+      fileName: `${statement.fileName} + ${newStmt.fileName}`,
+      rows: [...statement.rows, ...newStmt.rows],
+      metadata: {
+        ...statement.metadata,
+        periodEnd: newStmt.metadata?.periodEnd || statement.metadata?.periodEnd,
+      },
+    });
+  };
 
-  const exportReport = () => {
+  // Interactive Loan Calculator numbers
+  const loanCalculations = useMemo(() => {
+    if (!analysis) return null;
+    const policyMultiplier =
+      riskPolicy === "conservative" ? 0.28 : riskPolicy === "standard" ? 0.38 : 0.5;
+    const months = Math.max(1, analysis.monthlyBreakdown.length);
+    const monthlyNet = Math.max(0, analysis.net / months);
+    const monthlyIncome = analysis.income / months;
+
+    const safeMonthlyRepayment = Math.round(
+      Math.min(monthlyNet * policyMultiplier, monthlyIncome * policyMultiplier)
+    );
+    const maximumLoanCeiling = Math.round(safeMonthlyRepayment * loanTenureMonths);
+
+    return {
+      safeMonthlyRepayment,
+      maximumLoanCeiling,
+    };
+  }, [analysis, loanTenureMonths, riskPolicy]);
+
+  // Automatically persist statement analysis when user is logged in
+  useEffect(() => {
+    if (!statement || !analysis || !user || isSuspended) return;
+    const key = `${statement.fileName}_${statement.rows.length}_${analysis.net}`;
+    if (lastLoggedKey === key) return;
+    setLastLoggedKey(key);
+
+    recordStatementUpload({
+      userId: user.uid,
+      userEmail: user.email || "",
+      userName: profile?.displayName || user.displayName || user.email?.split("@")[0],
+      fileName: statement.fileName,
+      fileSize: statement.rows.length * 85,
+      rowCount: statement.rows.length,
+      openingBalance: analysis.openingBalance,
+      closingBalance: analysis.closingBalance,
+      netCashFlow: analysis.net,
+      totalInflow: analysis.income,
+      totalOutflow: analysis.outflow,
+      healthScore: analysis.underwriting.creditScore,
+      currentUploadCount: profile?.uploadedFilesCount || 0,
+    })
+      .then(() => {
+        refreshProfile();
+      })
+      .catch((err) => {
+        console.error("Failed to log statement record to Firestore:", err);
+      });
+  }, [statement, analysis, user, isSuspended, lastLoggedKey, profile, refreshProfile]);
+
+  const rawHolder = statement?.metadata?.accountHolder || "STATEMENT HOLDER";
+  const displayHolder = isPiiMasked
+    ? rawHolder
+        .split(" ")
+        .map((p) => (p.length > 2 ? `${p[0]}${"*".repeat(p.length - 2)}${p.slice(-1)}` : `${p[0]}*`))
+        .join(" ")
+    : rawHolder;
+
+  // Generate & Print/Save Comprehensive PDF Report
+  const handlePrintPdfReport = () => {
+    if (!statement || !analysis) return;
+    openPrintableReport({
+      applicantName: displayHolder,
+      accountNumber: statement.metadata?.accountNumber || "8038344359",
+      accountType: statement.metadata?.accountType || "Standard Account",
+      fileName: statement.fileName,
+      currency,
+      periodLabel: analysis.periodLabel,
+      periodStart: statement.metadata?.periodStart,
+      periodEnd: statement.metadata?.periodEnd,
+      openingBalance: analysis.openingBalance,
+      closingBalance: analysis.closingBalance,
+      minimumBalance: analysis.minimumBalance,
+      maximumBalance: analysis.maximumBalance,
+      income: analysis.income,
+      outflow: analysis.outflow,
+      net: analysis.net,
+      underwriting: analysis.underwriting,
+      forensics: analysis.forensics,
+      monthlyBreakdown: analysis.monthlyBreakdown,
+      weeklyBreakdown: analysis.weeklyBreakdown,
+      transactions: analysis.transactions.map((t) => ({
+        date: t.date,
+        description: t.description,
+        debit: t.debit,
+        credit: t.credit,
+        balance: t.balance,
+        category: t.category,
+      })),
+    });
+  };
+
+  const handleDownloadHtmlReport = () => {
+    if (!statement || !analysis) return;
+    downloadOfflineReport({
+      applicantName: displayHolder,
+      accountNumber: statement.metadata?.accountNumber || "8038344359",
+      accountType: statement.metadata?.accountType || "Standard Account",
+      fileName: statement.fileName,
+      currency,
+      periodLabel: analysis.periodLabel,
+      periodStart: statement.metadata?.periodStart,
+      periodEnd: statement.metadata?.periodEnd,
+      openingBalance: analysis.openingBalance,
+      closingBalance: analysis.closingBalance,
+      minimumBalance: analysis.minimumBalance,
+      maximumBalance: analysis.maximumBalance,
+      income: analysis.income,
+      outflow: analysis.outflow,
+      net: analysis.net,
+      underwriting: analysis.underwriting,
+      forensics: analysis.forensics,
+      monthlyBreakdown: analysis.monthlyBreakdown,
+      weeklyBreakdown: analysis.weeklyBreakdown,
+      transactions: analysis.transactions.map((t) => ({
+        date: t.date,
+        description: t.description,
+        debit: t.debit,
+        credit: t.credit,
+        balance: t.balance,
+        category: t.category,
+      })),
+    });
+  };
+
+  const exportReportJson = () => {
     if (!statement || !analysis) return;
     downloadFile(
       JSON.stringify(
         {
-          reportTitle: "Bank Statement Analysis Report",
+          reportTitle: "Bank Statement Underwriting & Forensic Intelligence Report",
           generatedAt: new Date().toISOString(),
+          currency,
           sourceFile: statement.fileName,
-          statementMetadata: statement.metadata,
-          summary: { ...analysis, transactions: undefined },
-          findings: analysis.findings,
-          recommendations: analysis.recommendations,
-          transactions: analysis.transactions.map(({ values }) =>
-            Object.fromEntries(
-              statement.headers.map((header, index) => [
-                header,
-                values[index] || "",
-              ]),
-            ),
-          ),
+          applicant: displayHolder,
+          accountType: statement.metadata?.accountType || "Standard Account",
+          periodLabel: analysis.periodLabel,
+          balancePosition: {
+            openingBalance: analysis.openingBalance,
+            closingBalance: analysis.closingBalance,
+            netBalanceMovement: analysis.netBalanceDelta,
+            balanceGrowthPercent: analysis.balanceGrowthRate,
+            minimumBalance: analysis.minimumBalance,
+            maximumBalance: analysis.maximumBalance,
+          },
+          creditRating: {
+            grade: analysis.underwriting.creditGrade,
+            score: analysis.underwriting.creditScore,
+            summary: analysis.underwriting.creditGradeDescription,
+          },
+          underwritingMetrics: {
+            averageDailyBalance: analysis.underwriting.averageDailyBalance,
+            dtiRatio: analysis.underwriting.dtiRatio,
+            foirRatio: analysis.underwriting.foirRatio,
+            dscrRatio: analysis.underwriting.dscrRatio,
+            cashRunwayDays: analysis.underwriting.cashRunwayDays,
+            recommendedLoanLimit: analysis.underwriting.recommendedLoanCeiling,
+            maxMonthlyRepayment: analysis.underwriting.maxMonthlyRepayment,
+          },
+          forensics: {
+            mathIntegrityScore: analysis.forensics.mathIntegrityScore,
+            forgeryRiskLevel: analysis.forensics.forgeryRiskLevel,
+            discrepancyCount: analysis.forensics.discrepancies.length,
+            roundTripsCount: analysis.forensics.roundTrips.length,
+          },
+          behavioralFlags: {
+            gamblingExposure: analysis.underwriting.gamblingExposure,
+            paydayLoans: analysis.underwriting.paydayLoanExposure,
+            nsfPenalties: analysis.underwriting.nsfAndPenalties,
+          },
+          monthlyBreakdown: analysis.monthlyBreakdown,
+          weeklyBreakdown: analysis.weeklyBreakdown,
+          categoryBreakdown: analysis.categoryBreakdown,
         },
         null,
-        2,
+        2
       ),
-      `${statement.fileName.replace(/\.[^.]+$/, "")}-analysis-report.json`,
-      "application/json",
+      `${statement.fileName.replace(/\.[^.]+$/, "")}-underwriting-dossier.json`,
+      "application/json"
     );
   };
 
-  const exportTransactions = () => {
+  const exportTransactionsCsv = () => {
     if (!statement) return;
-    const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
+    const escape = (val: string) => `"${val.replace(/"/g, '""')}"`;
     downloadFile(
       [statement.headers, ...statement.rows]
         .map((row) => row.map((cell) => escape(cell || "")).join(","))
         .join("\n"),
-      `${statement.fileName.replace(/\.[^.]+$/, "")}-transactions.csv`,
-      "text/csv;charset=utf-8",
+      `${statement.fileName.replace(/\.[^.]+$/, "")}-reconciled-transactions.csv`,
+      "text/csv;charset=utf-8"
     );
   };
 
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#0d1f23] flex flex-col items-center justify-center p-6 text-slate-200">
+        <div className="flex flex-col items-center gap-4">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#47705d] text-[#e8f5e9] shadow-lg animate-pulse">
+            <RefreshCw className="h-7 w-7 animate-spin" />
+          </div>
+          <div className="text-center space-y-1">
+            <h2 className="text-base font-semibold tracking-tight text-white">
+              Securing Workspace Session
+            </h2>
+            <p className="text-xs text-slate-400">
+              Verifying encryption keys and user privileges...
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthGateway />;
+  }
+
   return (
     <div className="min-h-screen">
+      <SuspendedBanner />
       <div className="mx-auto max-w-[1440px] px-4 pb-12 sm:px-6 lg:px-10">
-        <header className="flex items-center justify-between border-b border-border/80 py-5">
+        {/* Top Header */}
+        <header className="flex flex-wrap items-center justify-between gap-4 border-b border-border/80 py-5">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-accent shadow-sm">
               <RefreshCw className="h-5 w-5" />
             </div>
             <div>
               <p className="text-sm font-semibold tracking-tight">
-                Mofdan Digitals
+                Statement Analyzer & Underwriter
               </p>
               <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                Statement intelligence
+                Fintech & Lending Intelligence
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-3 text-sm text-muted-foreground">
-            <span className="hidden items-center gap-2 sm:flex">
-              <span className="h-2 w-2 rounded-full bg-[#68a98e]" />
-              Workspace ready
-            </span>
-            <button
-              className="rounded-full border border-border bg-white p-2.5 transition-colors hover:bg-muted"
-              aria-label="Help and support"
-            >
-              <CircleHelp className="h-4 w-4" />
-            </button>
+
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            {/* Currency Selector */}
+            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-white px-2.5 py-1.5 shadow-2xs">
+              <span className="font-semibold text-muted-foreground">Currency:</span>
+              <Select
+                value={currency}
+                onValueChange={(val) => setCurrency(val as SupportedCurrency)}
+              >
+                <SelectTrigger id="currency-select" className="h-7 w-[110px] border-0 text-xs font-semibold focus:ring-0">
+                  <SelectValue placeholder="Currency" />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.values(CURRENCIES).map((c) => (
+                    <SelectItem key={c.code} value={c.code} className="text-xs">
+                      {c.symbol} {c.code}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* PII Masking Switch */}
+            <div className="flex items-center space-x-2 rounded-lg border border-border bg-white px-3 py-1.5 shadow-2xs">
+              <Switch
+                id="main-pii-toggle"
+                checked={isPiiMasked}
+                onCheckedChange={setIsPiiMasked}
+              />
+              <Label
+                htmlFor="main-pii-toggle"
+                className="flex cursor-pointer items-center gap-1 font-medium text-muted-foreground text-xs"
+              >
+                {isPiiMasked ? (
+                  <>
+                    <EyeOff className="h-3.5 w-3.5 text-emerald-600" /> PII Masked
+                  </>
+                ) : (
+                  <>
+                    <Eye className="h-3.5 w-3.5" /> Mask PII
+                  </>
+                )}
+              </Label>
+            </div>
+
+            {analysis && (
+              <>
+                <Button
+                  id="generate-pdf-btn-header"
+                  size="sm"
+                  className="gap-1.5 bg-[#183238] font-medium text-white shadow-sm hover:bg-[#183238]/90"
+                  onClick={handlePrintPdfReport}
+                >
+                  <FileDown className="h-4 w-4 text-accent" /> Generate Report (PDF)
+                </Button>
+                <Button
+                  id="open-credit-memo-btn"
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5 font-medium shadow-2xs"
+                  onClick={() => setIsCreditMemoOpen(true)}
+                >
+                  <FileText className="h-4 w-4" /> Credit Memo
+                </Button>
+              </>
+            )}
+
+            <UserNav
+              onOpenAdmin={() => setIsAdminDashboardOpen(true)}
+              onOpenHistory={() => setIsUserHistoryOpen(true)}
+              onOpenAuth={() => setIsAuthModalOpen(true)}
+            />
           </div>
         </header>
+
+        {/* Main Canvas */}
         <main className="workspace-grid mt-6 overflow-hidden rounded-[1.5rem] border border-border/80 bg-white/60 shadow-[0_24px_80px_rgba(24,50,56,0.08)]">
-          <section className="animate-rise grid gap-8 border-b border-border/80 bg-primary px-6 py-10 text-primary-foreground sm:px-10 lg:grid-cols-[1.25fr_0.75fr] lg:px-14 lg:py-14">
+          {/* Hero Section */}
+          <section className="animate-rise grid gap-8 border-b border-border/80 bg-primary px-6 py-10 text-primary-foreground sm:px-10 lg:grid-cols-[1.25fr_0.75fr] lg:px-14 lg:py-12">
             <div>
-              <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-medium text-accent">
-                <ShieldCheck className="h-3.5 w-3.5" /> Decision support for
-                financial teams
+              <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-xs font-medium text-accent">
+                <ShieldCheck className="h-3.5 w-3.5" /> Institutional Grade · Credit Risk & Fraud Intelligence
               </div>
-              <h1 className="max-w-3xl text-4xl font-semibold leading-[1.05] tracking-[-0.04em] sm:text-6xl">
-                See the story
-                <br />
-                <span className="text-accent">behind the balance.</span>
+              <h1 className="max-w-3xl text-3xl font-semibold leading-[1.1] tracking-[-0.03em] sm:text-5xl">
+                Bank Statement Intelligence & Underwriting Engine
               </h1>
-              <p className="mt-6 max-w-xl text-base leading-7 text-white/70 sm:text-lg">
-                A professional statement review for cash-flow assessment, fraud
-                triage, and lending decisions.
+              <p className="mt-4 max-w-xl text-sm leading-6 text-white/70 sm:text-base">
+                Instant mathematical ledger reconciliation, cash flow underwriting, weekly/monthly inflow & outflow timelines, and automated summary PDF generation.
               </p>
             </div>
-            <div className="flex items-end lg:justify-end">
+
+            <div className="flex items-center lg:justify-end">
               <div className="w-full max-w-sm rounded-2xl border border-white/15 bg-white/10 p-5 backdrop-blur-sm">
                 <div className="flex items-center justify-between text-xs uppercase tracking-[0.16em] text-white/55">
-                  <span>Analysis flow</span>
-                  <span>01 / 03</span>
+                  <span>Audit Capabilities</span>
+                  <span>Institutional</span>
                 </div>
-                <div className="mt-6 space-y-4">
-                  {[
-                    "Upload a statement",
-                    "Map the money",
-                    "Review decision signals",
-                  ].map((step, index) => (
-                    <div key={step} className="flex items-center gap-3 text-sm">
-                      <span
-                        className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${index === 0 ? "bg-accent text-primary" : "border border-white/20 text-white/50"}`}
-                      >
-                        {index === 0 ? (
-                          <Check className="h-3.5 w-3.5" />
-                        ) : (
-                          index + 1
-                        )}
-                      </span>
-                      <span
-                        className={index === 0 ? "text-white" : "text-white/50"}
-                      >
-                        {step}
-                      </span>
-                    </div>
-                  ))}
+                <div className="mt-4 space-y-2.5 text-xs text-white/80">
+                  <div className="flex items-center gap-2">
+                    <Check className="h-3.5 w-3.5 text-accent" /> Opening & Closing Balance Position
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Check className="h-3.5 w-3.5 text-accent" /> Monthly & Weekly Inflow / Outflow Tables
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Check className="h-3.5 w-3.5 text-accent" /> Instant PDF Summary Report Generation
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Check className="h-3.5 w-3.5 text-accent" /> Running Balance Math & Tamper Audit
+                  </div>
                 </div>
               </div>
             </div>
           </section>
+
           <div className="space-y-8 p-5 sm:p-8 lg:p-10">
-            <div className="animate-rise-delay flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#6a8e88]">
-                  New analysis
-                </p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight">
-                  Start with a statement
-                </h2>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  Upload a PDF, Excel workbook, or CSV export. Analysis runs in
-                  your browser.
-                </p>
-              </div>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <LockKeyhole className="h-3.5 w-3.5" /> Your file stays in this
-                session
-              </div>
-            </div>
-            <Card className="overflow-hidden border-border/80 bg-white shadow-sm">
-              <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-5">
-                <div className="flex items-start justify-between gap-4">
+            {/* Statement Upload Card */}
+            <Card className="overflow-hidden border-border/80 bg-white shadow-xs">
+              <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
                     <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#e5f3d4] text-[#47705d]">
                       <Upload className="h-4 w-4" />
                     </div>
                     <div>
                       <CardTitle className="text-base">
-                        Bank statement
+                        Bank Statement Ingestion
                       </CardTitle>
-                      <CardDescription className="mt-1">
-                        PDF, Excel, or CSV statement with transaction and
-                        balance details.
+                      <CardDescription className="text-xs">
+                        Upload PDF (supports password encryption), Excel (XLS/XLSX), or CSV.
                       </CardDescription>
                     </div>
                   </div>
                   {statement && (
-                    <Badge className="bg-[#e5f3d4] text-[#47705d] hover:bg-[#e5f3d4]">
-                      <Check className="mr-1 h-3 w-3" /> Analysed
-                    </Badge>
+                    <div className="flex items-center gap-2">
+                      <Badge className="bg-[#e5f3d4] text-[#47705d] hover:bg-[#e5f3d4]">
+                        <Check className="mr-1 h-3 w-3" /> Statement Loaded
+                      </Badge>
+                      <Button
+                        id="append-statement-btn"
+                        size="sm"
+                        variant="outline"
+                        className="h-8 gap-1 text-xs"
+                        onClick={() => {
+                          const input = document.getElementById("statement-file-input");
+                          input?.click();
+                        }}
+                      >
+                        <Plus className="h-3.5 w-3.5" /> Append Month / File
+                      </Button>
+                    </div>
                   )}
                 </div>
               </CardHeader>
-              <CardContent className="pt-6">
-                <FileUpload onFileUpload={setStatement} fileNumber={1} />
+              <CardContent className="pt-5">
+                <FileUpload
+                  onFileUpload={(newStmt) => {
+                    if (isSuspended) {
+                      toast.error("Your account is suspended. Uploads are disabled.");
+                      return;
+                    }
+                    setStatement(newStmt);
+                  }}
+                  onAppendStatement={(newStmt) => {
+                    if (isSuspended) {
+                      toast.error("Your account is suspended. Uploads are disabled.");
+                      return;
+                    }
+                    handleAppendStatement(newStmt);
+                  }}
+                  onCurrencyDetected={setCurrency}
+                  fileNumber={1}
+                  hasExistingStatement={Boolean(statement)}
+                  disabled={isSuspended}
+                />
                 {statement && (
-                  <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg bg-muted p-3">
-                    <FileText className="h-4 w-4 text-[#47705d]" />
-                    <span className="max-w-[15rem] truncate text-sm font-medium">
-                      {statement.fileName}
-                    </span>
-                    <Badge variant="outline" className="ml-auto bg-white">
-                      {statement.rows.length.toLocaleString()} transactions
-                    </Badge>
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted p-3 text-xs">
+                    <div className="flex items-center gap-2">
+                      <FileText className="h-4 w-4 text-[#47705d]" />
+                      <span className="font-semibold text-foreground">
+                        {statement.fileName}
+                      </span>
+                      <Badge variant="outline" className="bg-white">
+                        {statement.rows.length.toLocaleString()} rows parsed
+                      </Badge>
+                    </div>
+                    <div className="text-muted-foreground">
+                      Applicant: <span className="font-medium text-foreground">{displayHolder}</span> · Period: <span className="font-medium text-foreground">{analysis?.periodLabel}</span>
+                    </div>
                   </div>
                 )}
               </CardContent>
             </Card>
+
             {analysis && (
-              <div className="space-y-6">
-                <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+              <div className="space-y-8 animate-rise">
+                {/* Executive Action Header */}
+                <div className="flex flex-col justify-between gap-4 border-b border-border pb-5 sm:flex-row sm:items-center">
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-                      Analysis report
-                    </p>
-                    <h2 className="mt-1 text-2xl font-semibold tracking-tight">
-                      Executive financial review
+                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      <span>Underwriting Report</span>
+                      <span>·</span>
+                      <span className="text-emerald-700 font-bold">Grade {analysis.underwriting.creditGrade}</span>
+                    </div>
+                    <h2 className="mt-1 text-2xl font-semibold tracking-tight text-foreground">
+                      Comprehensive Financial & Credit Dossier
                     </h2>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={exportReport}>
-                      <FileJson className="h-4 w-4" /> Export full report
+                    <Button
+                      id="generate-summary-pdf-cta"
+                      onClick={handlePrintPdfReport}
+                      className="gap-1.5 bg-[#183238] text-white hover:bg-[#183238]/90"
+                    >
+                      <FileDown className="h-4 w-4 text-accent" /> Generate Summary Report (PDF)
                     </Button>
-                    <Button variant="outline" onClick={exportTransactions}>
-                      <Download className="h-4 w-4" /> Export transactions
+                    <Button
+                      id="view-memo-cta-btn"
+                      variant="outline"
+                      onClick={() => setIsCreditMemoOpen(true)}
+                      className="gap-1.5"
+                    >
+                      <FileText className="h-4 w-4" /> Credit Committee Memo
+                    </Button>
+                    <Button variant="outline" onClick={handleDownloadHtmlReport} className="gap-1.5">
+                      <Download className="h-4 w-4" /> Download HTML Report
+                    </Button>
+                    <Button variant="outline" onClick={exportReportJson} className="gap-1.5">
+                      <FileJson className="h-4 w-4" /> Export JSON
+                    </Button>
+                    <Button variant="outline" onClick={exportTransactionsCsv} className="gap-1.5">
+                      <Download className="h-4 w-4" /> Export CSV
                     </Button>
                   </div>
                 </div>
-                <Card className="border-border/80 bg-[#fbfcfb] shadow-sm">
-                  <CardContent className="grid gap-4 p-5 sm:grid-cols-3">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Statement period</p>
-                      <p className="mt-1 font-medium">{analysis.periodLabel}</p>
+
+                {/* PROMINENT ACCOUNT BALANCE POSITION CARD */}
+                <Card className="border-2 border-primary/20 bg-gradient-to-br from-white to-[#f4f8f6] shadow-sm">
+                  <CardHeader className="border-b border-border/70 pb-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Wallet className="h-5 w-5 text-primary" />
+                        <CardTitle className="text-base font-bold text-foreground">
+                          Account Balance Position & Ledger Reconciliation
+                        </CardTitle>
+                      </div>
+                      <Badge variant="outline" className="bg-white text-xs font-medium">
+                        Period: {analysis.periodLabel}
+                      </Badge>
                     </div>
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Opening balance</p>
-                      <p className="mt-1 font-medium">{money.format(analysis.openingBalance)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Closing balance</p>
-                      <p className="mt-1 font-medium">{money.format(analysis.closingBalance)}</p>
+                    <CardDescription className="text-xs">
+                      Opening balance at start of coverage, closing balance at conclusion, and peak / trough boundaries.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="pt-5">
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+                      {/* Opening Balance */}
+                      <div className="rounded-xl border border-border bg-white p-4 shadow-2xs">
+                        <span className="text-xs font-semibold uppercase text-muted-foreground">
+                          Opening Balance
+                        </span>
+                        <p className="mt-2 text-2xl font-bold text-foreground">
+                          {formatMoney(analysis.openingBalance, currency)}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Balance brought forward
+                        </p>
+                      </div>
+
+                      {/* Closing Balance */}
+                      <div className="rounded-xl border border-border bg-white p-4 shadow-2xs">
+                        <span className="text-xs font-semibold uppercase text-muted-foreground">
+                          Closing Balance
+                        </span>
+                        <p className="mt-2 text-2xl font-bold text-foreground">
+                          {formatMoney(analysis.closingBalance, currency)}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Period end balance
+                        </p>
+                      </div>
+
+                      {/* Net Balance Delta */}
+                      <div className="rounded-xl border border-border bg-white p-4 shadow-2xs">
+                        <span className="text-xs font-semibold uppercase text-muted-foreground">
+                          Net Balance Movement
+                        </span>
+                        <p className={`mt-2 text-2xl font-bold ${analysis.netBalanceDelta >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                          {analysis.netBalanceDelta >= 0 ? "+" : ""}{formatMoney(analysis.netBalanceDelta, currency)}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {analysis.balanceGrowthRate >= 0 ? "+" : ""}{analysis.balanceGrowthRate.toFixed(1)}% balance change
+                        </p>
+                      </div>
+
+                      {/* Lowest Trough */}
+                      <div className="rounded-xl border border-border bg-white p-4 shadow-2xs">
+                        <span className="text-xs font-semibold uppercase text-muted-foreground">
+                          Lowest Trough
+                        </span>
+                        <p className="mt-2 text-2xl font-bold text-rose-700">
+                          {formatMoney(analysis.minimumBalance, currency)}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Minimum liquidity point
+                        </p>
+                      </div>
+
+                      {/* Peak Balance */}
+                      <div className="rounded-xl border border-border bg-white p-4 shadow-2xs">
+                        <span className="text-xs font-semibold uppercase text-muted-foreground">
+                          Peak Balance
+                        </span>
+                        <p className="mt-2 text-2xl font-bold text-emerald-700">
+                          {formatMoney(analysis.maximumBalance, currency)}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Maximum liquidity point
+                        </p>
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
-                <div className="grid gap-4 md:grid-cols-4">
+
+                {/* Primary High-Level Summary Metrics */}
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                   <Metric
-                    label="Money in"
-                    value={money.format(analysis.income)}
+                    label="Verified Inflow"
+                    value={formatMoney(analysis.income, currency)}
                     icon={<ArrowDownRight className="h-5 w-5 text-[#2e8b80]" />}
-                    note="Total credits detected"
+                    note={`${analysis.transactions.filter((t) => t.credit > 0).length} incoming deposits`}
                   />
                   <Metric
-                    label="Money out"
-                    value={money.format(analysis.outflow)}
+                    label="Total Outflow"
+                    value={formatMoney(analysis.outflow, currency)}
                     icon={<ArrowUpRight className="h-5 w-5 text-[#c85b4c]" />}
-                    note="Total debits detected"
+                    note={`Expense ratio: ${analysis.expenseRatio.toFixed(1)}% of income`}
                   />
                   <Metric
-                    label="Net cash flow"
-                    value={money.format(analysis.net)}
+                    label="Net Free Cash Flow"
+                    value={formatMoney(analysis.net, currency)}
                     icon={<TrendingUp className="h-5 w-5 text-[#47705d]" />}
-                    note={`${analysis.transactionCount} transactions`}
+                    note={analysis.net >= 0 ? "Cashflow Positive Surplus" : "Deficit / Burn"}
                   />
                   <Metric
-                    label="Risk signal"
-                    value={`${analysis.riskScore}/100`}
-                    icon={<AlertTriangle className="h-5 w-5 text-[#d68b46]" />}
-                    note={analysis.riskLabel}
+                    label="Credit Risk Rating"
+                    value={`Grade ${analysis.underwriting.creditGrade} (${analysis.underwriting.creditScore}/100)`}
+                    icon={<Scale className="h-5 w-5 text-[#183238]" />}
+                    note={analysis.underwriting.creditGradeDescription.split("·")[0]}
                   />
                 </div>
-                <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
-                  <Card className="border-border/80 shadow-sm">
-                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-5">
-                      <CardTitle className="flex items-center gap-2">
-                        <WalletCards className="h-5 w-5 text-[#47705d]" />{" "}
-                        Lending and cash-flow indicators
-                      </CardTitle>
+
+                {/* MONTHLY AND WEEKLY INFLOW AND OUTFLOW TABLES WITH TABS */}
+                {(() => {
+                  const monthsCount = Math.max(1, analysis.monthlyBreakdown.length);
+                  const weeksCount = Math.max(1, analysis.weeklyBreakdown.length);
+                  const avgWeeklyBalance =
+                    analysis.weeklyBreakdown.length > 0
+                      ? analysis.weeklyBreakdown.reduce((sum, w) => sum + (w.closingBalance ?? 0), 0) /
+                        analysis.weeklyBreakdown.length
+                      : analysis.averageBalance;
+                  const avgMonthlyInflow = analysis.income / monthsCount;
+                  const avgMonthlyOutflow = analysis.outflow / monthsCount;
+                  const avgMonthlyNet = analysis.net / monthsCount;
+                  const avgWeeklyInflow = analysis.income / weeksCount;
+                  const avgWeeklyOutflow = analysis.outflow / weeksCount;
+
+                  return (
+                    <Card className="border-border/80 shadow-xs">
+                      <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-4">
+                        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+                          <div>
+                            <CardTitle className="text-base flex items-center gap-2">
+                              <span>Cash Flow & Inflow/Outflow Breakdown</span>
+                              <Badge variant="outline" className="border-blue-200 bg-blue-50 text-blue-800 text-[10px]">
+                                Insight Format
+                              </Badge>
+                            </CardTitle>
+                            <CardDescription className="text-xs">
+                              Verified periodic turnover, weekly/monthly cash flow analysis, and total sum reconciliations.
+                            </CardDescription>
+                          </div>
+                          {/* Tab Switcher */}
+                          <div className="flex flex-wrap rounded-lg border border-border bg-slate-100 p-1 text-xs">
+                            <button
+                              type="button"
+                              id="tab-insight-btn"
+                              onClick={() => setTimelineTab("insight")}
+                              className={`rounded-md px-3 py-1.5 font-medium transition-all ${
+                                timelineTab === "insight"
+                                  ? "bg-white text-foreground shadow-xs font-semibold"
+                                  : "text-muted-foreground hover:text-foreground"
+                              }`}
+                            >
+                              Insight Report Format
+                            </button>
+                            <button
+                              type="button"
+                              id="tab-monthly-btn"
+                              onClick={() => setTimelineTab("monthly")}
+                              className={`rounded-md px-3 py-1.5 font-medium transition-all ${
+                                timelineTab === "monthly"
+                                  ? "bg-white text-foreground shadow-xs font-semibold"
+                                  : "text-muted-foreground hover:text-foreground"
+                              }`}
+                            >
+                              Monthly Summary ({analysis.monthlyBreakdown.length})
+                            </button>
+                            <button
+                              type="button"
+                              id="tab-weekly-btn"
+                              onClick={() => setTimelineTab("weekly")}
+                              className={`rounded-md px-3 py-1.5 font-medium transition-all ${
+                                timelineTab === "weekly"
+                                  ? "bg-white text-foreground shadow-xs font-semibold"
+                                  : "text-muted-foreground hover:text-foreground"
+                              }`}
+                            >
+                              Weekly Breakdown ({analysis.weeklyBreakdown.length})
+                            </button>
+                            <button
+                              type="button"
+                              id="tab-chart-btn"
+                              onClick={() => setTimelineTab("chart")}
+                              className={`rounded-md px-3 py-1.5 font-medium transition-all ${
+                                timelineTab === "chart"
+                                  ? "bg-white text-foreground shadow-xs font-semibold"
+                                  : "text-muted-foreground hover:text-foreground"
+                              }`}
+                            >
+                              Visual Chart
+                            </button>
+                          </div>
+                        </div>
+                      </CardHeader>
+                      <CardContent className="pt-5">
+                        {/* 1. INSIGHT REPORT FORMAT VIEW (Matches Official Sample Page 4) */}
+                        {timelineTab === "insight" && (
+                          <div className="space-y-6">
+                            {/* Cash Flow 4-Card Grid */}
+                            <div>
+                              <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">
+                                Cash Flow Overview
+                              </h4>
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                                  <div className="text-[11px] font-medium text-muted-foreground">Valid Credit (Inflow)</div>
+                                  <div className="mt-1 text-sm sm:text-base font-bold text-emerald-700 font-mono">
+                                    {formatMoney(analysis.income, currency)}
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                                  <div className="text-[11px] font-medium text-muted-foreground">Closing Balance</div>
+                                  <div className="mt-1 text-sm sm:text-base font-bold text-slate-800 font-mono">
+                                    {formatMoney(analysis.closingBalance, currency)}
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                                  <div className="text-[11px] font-medium text-muted-foreground">Average Monthly Balance</div>
+                                  <div className="mt-1 text-sm sm:text-base font-bold text-slate-800 font-mono">
+                                    {formatMoney(analysis.averageBalance, currency)}
+                                  </div>
+                                </div>
+                                <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                                  <div className="text-[11px] font-medium text-muted-foreground">Average Weekly Balance</div>
+                                  <div className="mt-1 text-sm sm:text-base font-bold text-slate-800 font-mono">
+                                    {formatMoney(avgWeeklyBalance, currency)}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Debits vs Credits Turnover Comparison Cards */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="rounded-lg border border-rose-200/80 bg-rose-50/20 p-4">
+                                <div className="font-bold text-sm text-rose-900 mb-3 flex items-center justify-between">
+                                  <span>Debits (Outflow Turnover)</span>
+                                  <span className="text-xs font-normal text-rose-700">Money Leaving Account</span>
+                                </div>
+                                <div className="space-y-2 text-xs">
+                                  <div className="flex justify-between py-1 border-b border-rose-100">
+                                    <span className="text-muted-foreground">Total Outflow Turnover:</span>
+                                    <span className="font-bold font-mono text-rose-700">{formatMoney(analysis.outflow, currency)}</span>
+                                  </div>
+                                  <div className="flex justify-between py-1 border-b border-rose-100">
+                                    <span className="text-muted-foreground">Average Weekly Debits:</span>
+                                    <span className="font-bold font-mono text-rose-700">{formatMoney(avgWeeklyOutflow, currency)}</span>
+                                  </div>
+                                  <div className="flex justify-between py-1">
+                                    <span className="text-muted-foreground">Average Monthly Debits:</span>
+                                    <span className="font-bold font-mono text-rose-700">{formatMoney(avgMonthlyOutflow, currency)}</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="rounded-lg border border-emerald-200/80 bg-emerald-50/20 p-4">
+                                <div className="font-bold text-sm text-emerald-900 mb-3 flex items-center justify-between">
+                                  <span>Credits (Inflow Turnover)</span>
+                                  <span className="text-xs font-normal text-emerald-700">Money Entering Account</span>
+                                </div>
+                                <div className="space-y-2 text-xs">
+                                  <div className="flex justify-between py-1 border-b border-emerald-100">
+                                    <span className="text-muted-foreground">Total Inflow Turnover:</span>
+                                    <span className="font-bold font-mono text-emerald-700">{formatMoney(analysis.income, currency)}</span>
+                                  </div>
+                                  <div className="flex justify-between py-1 border-b border-emerald-100">
+                                    <span className="text-muted-foreground">Average Weekly Credits:</span>
+                                    <span className="font-bold font-mono text-emerald-700">{formatMoney(avgWeeklyInflow, currency)}</span>
+                                  </div>
+                                  <div className="flex justify-between py-1">
+                                    <span className="text-muted-foreground">Average Monthly Credits:</span>
+                                    <span className="font-bold font-mono text-emerald-700">{formatMoney(avgMonthlyInflow, currency)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Side-by-Side Monthly Outflow and Inflow Tables */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                                <div className="bg-[#2563eb] text-white px-3 py-2 text-xs font-bold flex justify-between items-center">
+                                  <span>Monthly Outflow</span>
+                                  <span>Amount ({currency})</span>
+                                </div>
+                                <table className="w-full text-xs">
+                                  <tbody>
+                                    {analysis.monthlyBreakdown.map((m) => (
+                                      <tr key={`outflow-${m.month}`} className="border-b border-slate-100 hover:bg-slate-50">
+                                        <td className="px-3 py-2 text-foreground font-medium">{m.month}</td>
+                                        <td className="px-3 py-2 text-right font-mono font-semibold text-rose-700">
+                                          {formatMoney(m.outflow, currency)}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                  <tfoot>
+                                    <tr className="bg-blue-50 font-bold border-t-2 border-blue-200">
+                                      <td className="px-3 py-2 text-foreground">Total Outflow Sum</td>
+                                      <td className="px-3 py-2 text-right font-mono text-rose-700">
+                                        {formatMoney(analysis.outflow, currency)}
+                                      </td>
+                                    </tr>
+                                  </tfoot>
+                                </table>
+                              </div>
+
+                              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                                <div className="bg-[#2563eb] text-white px-3 py-2 text-xs font-bold flex justify-between items-center">
+                                  <span>Monthly Inflow</span>
+                                  <span>Amount ({currency})</span>
+                                </div>
+                                <table className="w-full text-xs">
+                                  <tbody>
+                                    {analysis.monthlyBreakdown.map((m) => (
+                                      <tr key={`inflow-${m.month}`} className="border-b border-slate-100 hover:bg-slate-50">
+                                        <td className="px-3 py-2 text-foreground font-medium">{m.month}</td>
+                                        <td className="px-3 py-2 text-right font-mono font-semibold text-emerald-700">
+                                          {formatMoney(m.income, currency)}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                  <tfoot>
+                                    <tr className="bg-blue-50 font-bold border-t-2 border-blue-200">
+                                      <td className="px-3 py-2 text-foreground">Total Inflow Sum</td>
+                                      <td className="px-3 py-2 text-right font-mono text-emerald-700">
+                                        {formatMoney(analysis.income, currency)}
+                                      </td>
+                                    </tr>
+                                  </tfoot>
+                                </table>
+                              </div>
+                            </div>
+
+                            {/* Side-by-Side Weekly Outflow and Inflow Tables */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                                <div className="bg-[#2563eb] text-white px-3 py-2 text-xs font-bold flex justify-between items-center">
+                                  <span>Weekly Outflow</span>
+                                  <span>Amount ({currency})</span>
+                                </div>
+                                <div className="max-h-[360px] overflow-y-auto">
+                                  <table className="w-full text-xs">
+                                    <thead className="bg-slate-100 text-muted-foreground sticky top-0">
+                                      <tr>
+                                        <th className="px-3 py-1.5 text-left font-semibold">Date</th>
+                                        <th className="px-3 py-1.5 text-left font-semibold">Week</th>
+                                        <th className="px-3 py-1.5 text-right font-semibold">Amount ({currency})</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {analysis.weeklyBreakdown.map((w, idx) => (
+                                        <tr key={`wk-out-${idx}`} className="border-b border-slate-100 hover:bg-slate-50">
+                                          <td className="px-3 py-1.5 text-foreground">{w.month}</td>
+                                          <td className="px-3 py-1.5 text-muted-foreground capitalize">{w.week}</td>
+                                          <td className="px-3 py-1.5 text-right font-mono font-semibold text-rose-700">
+                                            {formatMoney(w.outflow, currency)}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                    <tfoot>
+                                      <tr className="bg-blue-50 font-bold border-t-2 border-blue-200 sticky bottom-0">
+                                        <td colSpan={2} className="px-3 py-2 text-foreground">Total Outflow ({weeksCount} Weeks)</td>
+                                        <td className="px-3 py-2 text-right font-mono text-rose-700">
+                                          {formatMoney(analysis.outflow, currency)}
+                                        </td>
+                                      </tr>
+                                    </tfoot>
+                                  </table>
+                                </div>
+                              </div>
+
+                              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                                <div className="bg-[#2563eb] text-white px-3 py-2 text-xs font-bold flex justify-between items-center">
+                                  <span>Weekly Inflow</span>
+                                  <span>Amount ({currency})</span>
+                                </div>
+                                <div className="max-h-[360px] overflow-y-auto">
+                                  <table className="w-full text-xs">
+                                    <thead className="bg-slate-100 text-muted-foreground sticky top-0">
+                                      <tr>
+                                        <th className="px-3 py-1.5 text-left font-semibold">Date</th>
+                                        <th className="px-3 py-1.5 text-left font-semibold">Week</th>
+                                        <th className="px-3 py-1.5 text-right font-semibold">Amount ({currency})</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {analysis.weeklyBreakdown.map((w, idx) => (
+                                        <tr key={`wk-in-${idx}`} className="border-b border-slate-100 hover:bg-slate-50">
+                                          <td className="px-3 py-1.5 text-foreground">{w.month}</td>
+                                          <td className="px-3 py-1.5 text-muted-foreground capitalize">{w.week}</td>
+                                          <td className="px-3 py-1.5 text-right font-mono font-semibold text-emerald-700">
+                                            {formatMoney(w.income, currency)}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                    <tfoot>
+                                      <tr className="bg-blue-50 font-bold border-t-2 border-blue-200 sticky bottom-0">
+                                        <td colSpan={2} className="px-3 py-2 text-foreground">Total Inflow ({weeksCount} Weeks)</td>
+                                        <td className="px-3 py-2 text-right font-mono text-emerald-700">
+                                          {formatMoney(analysis.income, currency)}
+                                        </td>
+                                      </tr>
+                                    </tfoot>
+                                  </table>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 2. MONTHLY CONSOLIDATED SUMMARY TABLE VIEW */}
+                        {timelineTab === "monthly" && (
+                          <div className="space-y-4">
+                            {/* Summary Pill Strip */}
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                              <div className="rounded-md border border-emerald-200 bg-emerald-50/50 p-2.5">
+                                <div className="text-[11px] text-muted-foreground">Total Inflow (Cr) Sum</div>
+                                <div className="text-sm font-bold font-mono text-emerald-700">{formatMoney(analysis.income, currency)}</div>
+                              </div>
+                              <div className="rounded-md border border-rose-200 bg-rose-50/50 p-2.5">
+                                <div className="text-[11px] text-muted-foreground">Total Outflow (Dr) Sum</div>
+                                <div className="text-sm font-bold font-mono text-rose-700">{formatMoney(analysis.outflow, currency)}</div>
+                              </div>
+                              <div className="rounded-md border border-slate-200 bg-slate-50/50 p-2.5">
+                                <div className="text-[11px] text-muted-foreground">Net Period Cash Flow</div>
+                                <div className={`text-sm font-bold font-mono ${analysis.net >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                                  {analysis.net >= 0 ? "+" : ""}{formatMoney(analysis.net, currency)}
+                                </div>
+                              </div>
+                              <div className="rounded-md border border-slate-200 bg-slate-50/50 p-2.5">
+                                <div className="text-[11px] text-muted-foreground">Avg Monthly Turnover</div>
+                                <div className="text-sm font-bold font-mono text-slate-800">
+                                  {formatMoney((analysis.income + analysis.outflow) / (2 * monthsCount), currency)}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-xs">
+                                <thead>
+                                  <tr className="border-b text-muted-foreground">
+                                    <th className="pb-3 font-semibold">Month</th>
+                                    <th className="pb-3 text-right font-semibold">Total Inflow (Cr)</th>
+                                    <th className="pb-3 text-right font-semibold">Total Outflow (Dr)</th>
+                                    <th className="pb-3 text-right font-semibold">Net Cash Flow</th>
+                                    <th className="pb-3 text-right font-semibold">Month-End Balance</th>
+                                    <th className="pb-3 text-right font-semibold">Txns</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {analysis.monthlyBreakdown.map((m) => (
+                                    <tr key={m.month} className="border-b last:border-0 font-mono hover:bg-slate-50/70">
+                                      <td className="py-3 font-sans font-semibold text-foreground">{m.month}</td>
+                                      <td className="py-3 text-right font-medium text-emerald-700">
+                                        {formatMoney(m.income, currency)}
+                                      </td>
+                                      <td className="py-3 text-right font-medium text-rose-700">
+                                        {formatMoney(m.outflow, currency)}
+                                      </td>
+                                      <td className={`py-3 text-right font-bold ${m.net >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                                        {m.net >= 0 ? "+" : ""}{formatMoney(m.net, currency)}
+                                      </td>
+                                      <td className="py-3 text-right font-bold text-foreground">
+                                        {m.closingBalance !== undefined ? formatMoney(m.closingBalance, currency) : "-"}
+                                      </td>
+                                      <td className="py-3 text-right font-sans text-muted-foreground">
+                                        {m.transactionCount || "-"}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                                <tfoot>
+                                  <tr className="border-t-2 font-bold font-mono text-xs bg-slate-50/60">
+                                    <td className="py-3 font-sans">Total Across Period</td>
+                                    <td className="py-3 text-right text-emerald-700">{formatMoney(analysis.income, currency)}</td>
+                                    <td className="py-3 text-right text-rose-700">{formatMoney(analysis.outflow, currency)}</td>
+                                    <td className={`py-3 text-right ${analysis.net >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                                      {analysis.net >= 0 ? "+" : ""}{formatMoney(analysis.net, currency)}
+                                    </td>
+                                    <td className="py-3 text-right">{formatMoney(analysis.closingBalance, currency)}</td>
+                                    <td className="py-3 text-right font-sans">{analysis.transactions.length}</td>
+                                  </tr>
+                                  <tr className="border-t font-semibold font-mono text-xs bg-blue-50/40 text-muted-foreground">
+                                    <td className="py-2.5 font-sans">Monthly Average ({monthsCount} Mos)</td>
+                                    <td className="py-2.5 text-right text-emerald-700">{formatMoney(avgMonthlyInflow, currency)}</td>
+                                    <td className="py-2.5 text-right text-rose-700">{formatMoney(avgMonthlyOutflow, currency)}</td>
+                                    <td className={`py-2.5 text-right ${avgMonthlyNet >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                                      {avgMonthlyNet >= 0 ? "+" : ""}{formatMoney(avgMonthlyNet, currency)}</td>
+                                    <td className="py-2.5 text-right text-foreground">{formatMoney(analysis.averageBalance, currency)}</td>
+                                    <td className="py-2.5 text-right font-sans">{Math.round(analysis.transactions.length / monthsCount)}</td>
+                                  </tr>
+                                </tfoot>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 3. WEEKLY BREAKDOWN TABLE VIEW */}
+                        {timelineTab === "weekly" && (
+                          <div className="space-y-4">
+                            {/* Summary Pill Strip */}
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                              <div className="rounded-md border border-emerald-200 bg-emerald-50/50 p-2.5">
+                                <div className="text-[11px] text-muted-foreground">Total Inflow Sum</div>
+                                <div className="text-sm font-bold font-mono text-emerald-700">{formatMoney(analysis.income, currency)}</div>
+                              </div>
+                              <div className="rounded-md border border-rose-200 bg-rose-50/50 p-2.5">
+                                <div className="text-[11px] text-muted-foreground">Total Outflow Sum</div>
+                                <div className="text-sm font-bold font-mono text-rose-700">{formatMoney(analysis.outflow, currency)}</div>
+                              </div>
+                              <div className="rounded-md border border-slate-200 bg-slate-50/50 p-2.5">
+                                <div className="text-[11px] text-muted-foreground">Avg Weekly Inflow</div>
+                                <div className="text-sm font-bold font-mono text-emerald-700">{formatMoney(avgWeeklyInflow, currency)}</div>
+                              </div>
+                              <div className="rounded-md border border-slate-200 bg-slate-50/50 p-2.5">
+                                <div className="text-[11px] text-muted-foreground">Avg Weekly Outflow</div>
+                                <div className="text-sm font-bold font-mono text-rose-700">{formatMoney(avgWeeklyOutflow, currency)}</div>
+                              </div>
+                            </div>
+
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-xs">
+                                <thead>
+                                  <tr className="border-b text-muted-foreground">
+                                    <th className="pb-3 font-semibold">Month</th>
+                                    <th className="pb-3 font-semibold">Week</th>
+                                    <th className="pb-3 font-semibold">Date Interval</th>
+                                    <th className="pb-3 text-right font-semibold">Inflow (Cr)</th>
+                                    <th className="pb-3 text-right font-semibold">Outflow (Dr)</th>
+                                    <th className="pb-3 text-right font-semibold">Net Movement</th>
+                                    <th className="pb-3 text-right font-semibold">Week-End Balance</th>
+                                    <th className="pb-3 text-right font-semibold">Txns</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {analysis.weeklyBreakdown.map((w, idx) => (
+                                    <tr key={`${w.month}-${w.week}-${idx}`} className="border-b last:border-0 font-mono hover:bg-slate-50/70">
+                                      <td className="py-3 font-sans font-semibold text-foreground">{w.month}</td>
+                                      <td className="py-3 font-sans font-medium text-muted-foreground capitalize">{w.week}</td>
+                                      <td className="py-3 font-sans text-muted-foreground">{w.startDate} - {w.endDate}</td>
+                                      <td className="py-3 text-right font-medium text-emerald-700">
+                                        {formatMoney(w.income, currency)}
+                                      </td>
+                                      <td className="py-3 text-right font-medium text-rose-700">
+                                        {formatMoney(w.outflow, currency)}
+                                      </td>
+                                      <td className={`py-3 text-right font-bold ${w.net >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                                        {w.net >= 0 ? "+" : ""}{formatMoney(w.net, currency)}
+                                      </td>
+                                      <td className="py-3 text-right font-bold text-foreground">
+                                        {w.closingBalance !== undefined ? formatMoney(w.closingBalance, currency) : "-"}
+                                      </td>
+                                      <td className="py-3 text-right font-sans text-muted-foreground">
+                                        {w.transactionCount}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                                <tfoot>
+                                  <tr className="border-t-2 font-bold font-mono text-xs bg-slate-50/60">
+                                    <td colSpan={3} className="py-3 font-sans">Total Across Period ({weeksCount} Weeks)</td>
+                                    <td className="py-3 text-right text-emerald-700">{formatMoney(analysis.income, currency)}</td>
+                                    <td className="py-3 text-right text-rose-700">{formatMoney(analysis.outflow, currency)}</td>
+                                    <td className={`py-3 text-right ${analysis.net >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                                      {analysis.net >= 0 ? "+" : ""}{formatMoney(analysis.net, currency)}
+                                    </td>
+                                    <td className="py-3 text-right">{formatMoney(analysis.closingBalance, currency)}</td>
+                                    <td className="py-3 text-right font-sans">{analysis.transactions.length}</td>
+                                  </tr>
+                                </tfoot>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 4. VISUAL CHART VIEW */}
+                        {timelineTab === "chart" && (
+                          <div className="h-[280px] w-full pt-2">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <BarChart data={analysis.monthlyBreakdown} margin={{ top: 8, right: 8, left: 8, bottom: 8 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dbe6e1" />
+                                <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 12 }} />
+                                <YAxis
+                                  tickLine={false}
+                                  axisLine={false}
+                                  tick={{ fontSize: 11 }}
+                                  tickFormatter={(val) => `${CURRENCIES[currency]?.symbol || ""}${Math.round(val / 1000)}k`}
+                                />
+                                <Tooltip
+                                  formatter={(value) => formatMoney(Number(value), currency)}
+                                  cursor={{ fill: "rgba(24,50,56,0.04)" }}
+                                />
+                                <Legend />
+                                <Bar dataKey="income" name="Money In (Inflow)" fill="#2e8b80" radius={[4, 4, 0, 0]} />
+                                <Bar dataKey="outflow" name="Money Out (Outflow)" fill="#c85b4c" radius={[4, 4, 0, 0]} />
+                              </BarChart>
+                            </ResponsiveContainer>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  );
+                })()}
+
+                {/* SECTION 1: Forensic Math Reconciliation & Tampering Audit */}
+                <Card className={`border-2 shadow-xs ${
+                  analysis.forensics.forgeryRiskLevel === "Critical"
+                    ? "border-rose-300 bg-rose-50/20"
+                    : analysis.forensics.forgeryRiskLevel === "Moderate"
+                    ? "border-amber-300 bg-amber-50/20"
+                    : "border-emerald-300 bg-emerald-50/20"
+                }`}>
+                  <CardHeader className="pb-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <ShieldCheck className={`h-5 w-5 ${
+                          analysis.forensics.forgeryRiskLevel === "Critical"
+                            ? "text-rose-600"
+                            : analysis.forensics.forgeryRiskLevel === "Moderate"
+                            ? "text-amber-600"
+                            : "text-emerald-600"
+                        }`} />
+                        <CardTitle className="text-base">
+                          Forensic Integrity & Mathematical Balance Reconciliation
+                        </CardTitle>
+                      </div>
+                      <Badge
+                        variant={
+                          analysis.forensics.forgeryRiskLevel === "Low"
+                            ? "outline"
+                            : analysis.forensics.forgeryRiskLevel === "Moderate"
+                            ? "secondary"
+                            : "destructive"
+                        }
+                        className="px-3 py-1 font-semibold"
+                      >
+                        Ledger Tamper Risk: {analysis.forensics.forgeryRiskLevel}
+                      </Badge>
+                    </div>
+                    <CardDescription>
+                      Every transaction row is mathematically reconciled against the running balance:{" "}
+                      <code className="rounded bg-muted px-1 text-[11px]">Previous Balance + Inflow - Outflow = Stated Balance</code>
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4 pt-1">
+                    <div className="grid gap-3 sm:grid-cols-3 text-xs">
+                      <div className="rounded-lg border bg-white p-3 shadow-2xs">
+                        <span className="text-muted-foreground">Ledger Math Reconciliation</span>
+                        <p className={`mt-1 text-lg font-bold ${
+                          analysis.forensics.mathIntegrityScore === 100
+                            ? "text-emerald-700"
+                            : "text-rose-700"
+                        }`}>
+                          {analysis.forensics.mathIntegrityScore}% Matched
+                        </p>
+                        <span className="text-muted-foreground">
+                          {analysis.forensics.totalChecks - analysis.forensics.discrepancies.length} of {analysis.forensics.totalChecks} rows passed math check
+                        </span>
+                      </div>
+
+                      <div className="rounded-lg border bg-white p-3 shadow-2xs">
+                        <span className="text-muted-foreground">Wash-Trading / Round-Tripping</span>
+                        <p className={`mt-1 text-lg font-bold ${
+                          analysis.forensics.roundTrips.length === 0
+                            ? "text-emerald-700"
+                            : "text-amber-700"
+                        }`}>
+                          {analysis.forensics.roundTrips.length} Detected
+                        </p>
+                        <span className="text-muted-foreground">
+                          {analysis.forensics.roundTrips.length === 0
+                            ? "No rapid deposit-drain cycles"
+                            : "Inflows drained >70% within 48h"}
+                        </span>
+                      </div>
+
+                      <div className="rounded-lg border bg-white p-3 shadow-2xs">
+                        <span className="text-muted-foreground">Structuring / Smurfing Flags</span>
+                        <p className={`mt-1 text-lg font-bold ${
+                          analysis.forensics.structuringAlerts.length === 0
+                            ? "text-emerald-700"
+                            : "text-amber-700"
+                        }`}>
+                          {analysis.forensics.structuringAlerts.length} Flagged
+                        </p>
+                        <span className="text-muted-foreground">
+                          Transactions clustering just below regulatory limits
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Discrepancies Details if any */}
+                    {analysis.forensics.discrepancies.length > 0 && (
+                      <div className="rounded-lg border border-rose-200 bg-white p-4">
+                        <div className="flex items-center gap-2 text-rose-800 text-xs font-bold">
+                          <AlertCircle className="h-4 w-4 text-rose-600" />
+                          <span>Mathematical Ledger Inconsistencies Detected ({analysis.forensics.discrepancies.length} Breaks)</span>
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          The following rows show stated balances that do not equal the mathematical sum of preceding transactions. This is a primary indicator of manual PDF editing or forged statements:
+                        </p>
+                        <div className="mt-3 overflow-x-auto">
+                          <table className="w-full text-left text-xs">
+                            <thead>
+                              <tr className="border-b text-muted-foreground">
+                                <th className="pb-2">Row #</th>
+                                <th className="pb-2">Date</th>
+                                <th className="pb-2">Description</th>
+                                <th className="pb-2">Stated Balance</th>
+                                <th className="pb-2">Expected Balance</th>
+                                <th className="pb-2">Variance</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {analysis.forensics.discrepancies.slice(0, 5).map((d) => (
+                                <tr key={d.rowIndex} className="border-b font-mono">
+                                  <td className="py-1.5 font-bold text-rose-700">#{d.rowIndex}</td>
+                                  <td className="py-1.5">{d.date}</td>
+                                  <td className="py-1.5 max-w-[150px] truncate">{d.description}</td>
+                                  <td className="py-1.5 font-bold text-rose-700">{formatMoney(d.statedBalance, currency)}</td>
+                                  <td className="py-1.5 text-emerald-700">{formatMoney(d.expectedBalance, currency)}</td>
+                                  <td className="py-1.5 font-semibold text-rose-600">{formatMoney(d.difference, currency)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* SECTION 2: Credit Underwriting, Solvency & Loan Affordability Calculator */}
+                <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+                  <Card className="border-border/80 shadow-xs">
+                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-4">
+                      <div className="flex items-center gap-2">
+                        <WalletCards className="h-5 w-5 text-[#47705d]" />
+                        <CardTitle className="text-base">
+                          Underwriting Solvency & Core Ratios
+                        </CardTitle>
+                      </div>
                       <CardDescription>
-                        Measures to support affordability, source-of-funds, and
-                        account management review.
+                        Standard credit committee metrics used for risk tiering and lending decisions.
                       </CardDescription>
                     </CardHeader>
-                    <CardContent className="grid gap-3 pt-6 sm:grid-cols-2">
+                    <CardContent className="grid gap-3 pt-5 sm:grid-cols-2">
                       <Signal
-                        label="Expense ratio"
-                        value={`${analysis.expenseRatio.toFixed(1)}%`}
-                        detail="Outflows as a share of inflows"
+                        label="Average Daily Balance (ADB)"
+                        value={formatMoney(analysis.underwriting.averageDailyBalance, currency)}
+                        detail="Core liquidity baseline weighted across period"
                       />
                       <Signal
-                        label="Opening balance"
-                        value={money.format(analysis.openingBalance)}
-                        detail="Balance at the start of the period"
+                        label="Debt-to-Income (DTI)"
+                        value={`${analysis.underwriting.dtiRatio}%`}
+                        detail="Existing debt service as % of verified income"
                       />
                       <Signal
-                        label="Closing balance"
-                        value={money.format(analysis.closingBalance)}
-                        detail="Last detected running balance"
+                        label="Fixed Obligation Ratio (FOIR)"
+                        value={`${analysis.underwriting.foirRatio}%`}
+                        detail="Debt + fixed utility and bills commitments"
                       />
                       <Signal
-                        label="Average credit"
-                        value={money.format(analysis.averageCredit)}
-                        detail="Average incoming transaction"
+                        label="Debt Service Coverage (DSCR)"
+                        value={`${analysis.underwriting.dscrRatio.toFixed(2)}x`}
+                        detail={analysis.underwriting.dscrRatio >= 1.25 ? "Safe coverage (>1.25x)" : "Tight coverage (<1.25x)"}
                       />
                       <Signal
-                        label="Average debit"
-                        value={money.format(analysis.averageDebit)}
-                        detail="Average outgoing transaction"
+                        label="Cash Runway"
+                        value={`${analysis.underwriting.cashRunwayDays} Days`}
+                        detail="Survival days based on daily outflow velocity"
                       />
                       <Signal
-                        label="Transfers"
-                        value={`${analysis.transferCount}`}
-                        detail="Bank transfer activity"
-                      />
-                      <Signal
-                        label="Recurring patterns"
-                        value={`${analysis.recurringCount}`}
-                        detail="Salary, bills, subscriptions"
+                        label="Income Stability Cadence"
+                        value={analysis.underwriting.salaryCadenceStatus}
+                        detail="Payroll regularity and periodicity"
                       />
                     </CardContent>
                   </Card>
-                  <Card className="border-border/80 bg-[#183238] text-white shadow-sm">
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2 text-white">
-                        <Banknote className="h-5 w-5 text-[#d9f36b]" /> Analyst
-                        conclusion
-                      </CardTitle>
+
+                  {/* Interactive Loan Affordability & Ceiling Calculator */}
+                  <Card className="border-border/80 bg-[#183238] text-white shadow-xs">
+                    <CardHeader className="pb-3">
+                      <div className="flex items-center gap-2">
+                        <Banknote className="h-5 w-5 text-accent" />
+                        <CardTitle className="text-base text-white">
+                          Loan Affordability Calculator
+                        </CardTitle>
+                      </div>
+                      <CardDescription className="text-white/70 text-xs">
+                        Simulate credit limits based on applicant&apos;s verified disposable surplus.
+                      </CardDescription>
                     </CardHeader>
-                    <CardContent>
-                      <Badge className="bg-[#d9f36b] text-[#183238] hover:bg-[#d9f36b]">
-                        {analysis.riskLabel}
-                      </Badge>
-                      <p className="mt-4 text-sm leading-6 text-white/70">
-                        {analysis.riskNote}
+                    <CardContent className="space-y-4">
+                      {/* Tenure Selector */}
+                      <div>
+                        <span className="text-xs font-medium text-white/80">Proposed Loan Tenure:</span>
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          {[1, 3, 6, 12].map((months) => (
+                            <button
+                              key={months}
+                              type="button"
+                              onClick={() => setLoanTenureMonths(months)}
+                              className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
+                                loanTenureMonths === months
+                                  ? "bg-accent text-primary"
+                                  : "border border-white/20 text-white/70 hover:bg-white/10"
+                              }`}
+                            >
+                              {months} {months === 1 ? "Month" : "Months"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Risk Policy Selector */}
+                      <div>
+                        <span className="text-xs font-medium text-white/80">Debt Capacity Policy:</span>
+                        <div className="mt-1.5 flex gap-1.5">
+                          {(["conservative", "standard", "aggressive"] as const).map((policy) => (
+                            <button
+                              key={policy}
+                              type="button"
+                              onClick={() => setRiskPolicy(policy)}
+                              className={`capitalize rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
+                                riskPolicy === policy
+                                  ? "bg-accent text-primary"
+                                  : "border border-white/20 text-white/70 hover:bg-white/10"
+                              }`}
+                            >
+                              {policy}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Output Calculations */}
+                      {loanCalculations && (
+                        <div className="rounded-xl border border-white/15 bg-white/10 p-4 space-y-3">
+                          <div>
+                            <span className="text-xs text-white/60">Maximum Recommended Loan Limit</span>
+                            <p className="text-2xl font-bold text-accent">
+                              {formatMoney(loanCalculations.maximumLoanCeiling, currency)}
+                            </p>
+                          </div>
+                          <div className="flex items-center justify-between border-t border-white/10 pt-2 text-xs">
+                            <span className="text-white/70">Safe Monthly Repayment:</span>
+                            <span className="font-semibold text-white">
+                              {formatMoney(loanCalculations.safeMonthlyRepayment, currency)}/mo
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* SECTION 3: High-Risk Behavioral Flags & Merchant Triage */}
+                <div>
+                  <div className="mb-3 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-lg font-semibold text-foreground">
+                        High-Risk Behavioral & Merchant Triage
+                      </h3>
+                      <p className="text-xs text-muted-foreground">
+                        Automated detection of gambling losses, payday loan stacking, and returned bank penalties.
                       </p>
-                      <div className="mt-6 flex items-center justify-between border-t border-white/10 pt-4 text-xs text-white/50">
-                        <span>Rules-based triage</span>
-                        <span>Human review required</span>
-                      </div>
-                    </CardContent>
-                  </Card>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    {/* Gambling Exposure */}
+                    <Card className={`border shadow-xs ${
+                      analysis.underwriting.gamblingExposure.count > 0 ? "border-amber-300 bg-amber-50/20" : ""
+                    }`}>
+                      <CardContent className="p-4">
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <p className="text-xs font-semibold uppercase text-muted-foreground">Gambling & Betting</p>
+                            <p className="mt-1 text-xl font-bold text-foreground">
+                              {formatMoney(analysis.underwriting.gamblingExposure.totalSpent, currency)}
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {analysis.underwriting.gamblingExposure.count} transactions ({analysis.underwriting.gamblingExposure.percentOfOutflow}% of outflows)
+                            </p>
+                          </div>
+                          <div className="rounded-lg bg-amber-100 p-2 text-amber-800">
+                            <Dices className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+
+                    {/* Payday Loan Stacking */}
+                    <Card className={`border shadow-xs ${
+                      analysis.underwriting.paydayLoanExposure.appCount > 0 ? "border-rose-300 bg-rose-50/20" : ""
+                    }`}>
+                      <CardContent className="p-4">
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <p className="text-xs font-semibold uppercase text-muted-foreground">Payday / Micro-Loans</p>
+                            <p className="mt-1 text-xl font-bold text-foreground">
+                              {analysis.underwriting.paydayLoanExposure.appCount} App(s) Detected
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {analysis.underwriting.paydayLoanExposure.detectedApps.length > 0
+                                ? analysis.underwriting.paydayLoanExposure.detectedApps.join(", ")
+                                : "No payday stacking detected"}
+                            </p>
+                          </div>
+                          <div className="rounded-lg bg-rose-100 p-2 text-rose-800">
+                            <Building className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+
+                    {/* NSF Penalties */}
+                    <Card className={`border shadow-xs ${
+                      analysis.underwriting.nsfAndPenalties.count > 0 ? "border-rose-300 bg-rose-50/20" : ""
+                    }`}>
+                      <CardContent className="p-4">
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <p className="text-xs font-semibold uppercase text-muted-foreground">NSF & Bank Penalties</p>
+                            <p className="mt-1 text-xl font-bold text-foreground">
+                              {analysis.underwriting.nsfAndPenalties.count} Penalty Incident(s)
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {formatMoney(analysis.underwriting.nsfAndPenalties.totalAmount, currency)} in bounced / excess fees
+                            </p>
+                          </div>
+                          <div className="rounded-lg bg-slate-100 p-2 text-slate-800">
+                            <Receipt className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
                 </div>
-                <div className="grid gap-6 lg:grid-cols-[1.3fr_0.7fr]">
-                  <Card className="border-border/80 shadow-sm">
-                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-5">
-                      <CardTitle>Monthly cash-flow trend</CardTitle>
-                      <CardDescription>Compare incoming and outgoing funds across the complete statement period.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="pt-6">
-                      <div className="h-[300px] w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={analysis.monthlyBreakdown} margin={{ top: 8, right: 8, left: 8, bottom: 8 }}>
-                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dbe6e1" />
-                            <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 12 }} />
-                            <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 12 }} tickFormatter={(value) => `₦${Math.round(value / 1000)}k`} />
-                            <Tooltip formatter={(value) => money.format(Number(value))} cursor={{ fill: "rgba(24,50,56,0.04)" }} />
-                            <Legend />
-                            <Bar dataKey="income" name="Money in" fill="#2e8b80" radius={[4, 4, 0, 0]} />
-                            <Bar dataKey="outflow" name="Money out" fill="#c85b4c" radius={[4, 4, 0, 0]} />
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </CardContent>
-                  </Card>
-                  <Card className="border-border/80 shadow-sm">
-                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-5">
-                      <CardTitle>Monthly net position</CardTitle>
-                      <CardDescription>Net movement after detected debits.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-3 pt-6">
-                      {analysis.monthlyBreakdown.map((month) => <div key={month.month} className="flex items-center justify-between border-b border-border/70 pb-3 last:border-0"><span className="text-sm text-muted-foreground">{month.month}</span><span className={`font-semibold ${month.net < 0 ? "text-[#c85b4c]" : "text-[#2e8b80]"}`}>{money.format(month.net)}</span></div>)}
-                    </CardContent>
-                  </Card>
-                </div>
+
+                {/* SECTION 4: 4-Dimension Risk Scorecard & Category Breakdown */}
                 <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
-                  <Card className="border-border/80 shadow-sm">
-                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-5">
-                      <CardTitle>Transaction categories</CardTitle>
-                      <CardDescription>Detected from transaction descriptions and narration patterns.</CardDescription>
+                  {/* 4-Dimension Risk Scorecard */}
+                  <Card className="border-border/80 shadow-xs">
+                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-4">
+                      <CardTitle className="text-base">Risk Dimension Scorecard</CardTitle>
+                      <CardDescription className="text-xs">
+                        Objective breakdown of borrower risk pillars.
+                      </CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4 pt-6">
-                      {analysis.categoryBreakdown.map((category) => {
-                        const share = analysis.outflow + analysis.income > 0
-                          ? (category.amount / (analysis.outflow + analysis.income)) * 100
-                          : 0;
-                        return (
-                          <div key={category.category}>
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="font-medium">{category.category}</span>
-                              <span className="text-muted-foreground">{category.count} · {money.format(category.amount)}</span>
-                            </div>
-                            <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#eef3f0]">
-                              <div className="h-full rounded-full bg-[#2e8b80]" style={{ width: `${Math.max(3, share)}%` }} />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </CardContent>
-                  </Card>
-                  <Card className="border-border/80 shadow-sm">
-                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-5">
-                      <CardTitle>Risk scorecard</CardTitle>
-                      <CardDescription>Four dimensions for a consistent financial assessment.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
+                    <CardContent className="space-y-3.5 pt-5">
                       {analysis.riskMetrics.map((metric) => (
-                        <div key={metric.label} className="rounded-lg border border-border/80 p-4">
-                          <div className="flex items-center justify-between gap-3">
-                            <span className="text-sm font-medium">{metric.label}</span>
-                            <span className={`text-lg font-semibold ${metric.score < 40 ? "text-[#c85b4c]" : metric.score < 70 ? "text-[#d68b46]" : "text-[#2e8b80]"}`}>{metric.score}</span>
+                        <div key={metric.label} className="rounded-lg border border-border/80 p-3 text-xs">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-foreground">{metric.label}</span>
+                            <span
+                              className={`font-bold ${
+                                metric.score < 50
+                                  ? "text-rose-600"
+                                  : metric.score < 75
+                                  ? "text-amber-600"
+                                  : "text-emerald-700"
+                              }`}
+                            >
+                              {metric.score}/100
+                            </span>
                           </div>
-                          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#eef3f0]">
-                            <div className={`h-full rounded-full ${metric.score < 40 ? "bg-[#c85b4c]" : metric.score < 70 ? "bg-[#d68b46]" : "bg-[#2e8b80]"}`} style={{ width: `${metric.score}%` }} />
+                          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                            <div
+                              className={`h-full rounded-full ${
+                                metric.score < 50
+                                  ? "bg-rose-500"
+                                  : metric.score < 75
+                                  ? "bg-amber-500"
+                                  : "bg-emerald-600"
+                              }`}
+                              style={{ width: `${Math.max(5, metric.score)}%` }}
+                            />
                           </div>
-                          <p className="mt-2 text-xs text-muted-foreground">{metric.detail}</p>
+                          <p className="mt-1.5 text-[11px] text-muted-foreground">{metric.detail}</p>
                         </div>
                       ))}
                     </CardContent>
                   </Card>
-                </div>
-                <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
-                  <Card className="border-border/80 shadow-sm">
-                    <CardHeader>
-                      <CardTitle>Balance health</CardTitle>
-                      <CardDescription>Observed running-balance range.</CardDescription>
+
+                  {/* Category Breakdown */}
+                  <Card className="border-border/80 shadow-xs">
+                    <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-4">
+                      <CardTitle className="text-base">Categorized Inflows & Outflows</CardTitle>
+                      <CardDescription className="text-xs">
+                        Automatically classified by institutional merchant definitions.
+                      </CardDescription>
                     </CardHeader>
-                    <CardContent className="grid grid-cols-3 gap-3">
-                      <Signal label="Average" value={money.format(analysis.averageBalance)} detail="Observed balance" />
-                      <Signal label="Minimum" value={money.format(analysis.minimumBalance)} detail="Lowest point" />
-                      <Signal label="Maximum" value={money.format(analysis.maximumBalance)} detail="Highest point" />
-                    </CardContent>
-                  </Card>
-                  <Card className="border-border/80 shadow-sm">
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-[#d68b46]" /> Fraud and anomaly queue</CardTitle>
-                      <CardDescription>Rule-based signals requiring human review, not proof of fraud.</CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                      {analysis.anomalies.length ? (
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          {analysis.anomalies.map((anomaly) => (
-                            <div key={anomaly.title} className="rounded-lg border border-[#ead9c2] bg-[#fffaf2] p-4">
-                              <div className="flex items-center justify-between gap-3">
-                                <p className="text-sm font-semibold">{anomaly.title}</p>
-                                <Badge variant={anomaly.severity === "High" ? "destructive" : "outline"}>{anomaly.severity}</Badge>
+                    <CardContent className="space-y-3.5 pt-5">
+                      <div className="space-y-2.5">
+                        {analysis.categoryBreakdown.slice(0, 6).map((cat) => {
+                          const totalVolume = analysis.income + analysis.outflow;
+                          const pct = totalVolume > 0 ? (cat.amount / totalVolume) * 100 : 0;
+                          return (
+                            <div key={cat.category} className="rounded-lg border border-border/70 p-2.5 text-xs">
+                              <div className="flex items-center justify-between">
+                                <span className="font-medium text-foreground">{cat.category}</span>
+                                <span className="font-semibold text-foreground">
+                                  {formatMoney(cat.amount, currency)} ({cat.count})
+                                </span>
                               </div>
-                              <p className="mt-2 text-xs leading-5 text-muted-foreground">{anomaly.detail}</p>
+                              <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                                <div
+                                  className="h-full rounded-full bg-primary/80"
+                                  style={{ width: `${Math.max(2, pct)}%` }}
+                                />
+                              </div>
                             </div>
-                          ))}
-                        </div>
-                      ) : <p className="text-sm text-muted-foreground">No duplicate or high-signal suspicious pattern was detected.</p>}
+                          );
+                        })}
+                      </div>
                     </CardContent>
                   </Card>
                 </div>
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <Card className="border-border/80 shadow-sm">
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2">
-                        <AlertTriangle className="h-5 w-5 text-[#d68b46]" />{" "}
-                        Findings and exceptions
-                      </CardTitle>
-                      <CardDescription>
-                        Items that should be documented before a financial
-                        decision.
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                      {analysis.findings.length ? (
-                        <ul className="space-y-3 text-sm">
-                          {analysis.findings.map((finding) => (
-                            <li key={finding} className="flex gap-3">
-                              <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#d68b46]" />
-                              {finding}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <p className="text-sm text-muted-foreground">
-                          No rule-based exceptions were detected in this
-                          statement.
-                        </p>
-                      )}
-                    </CardContent>
-                  </Card>
-                  <Card className="border-border/80 shadow-sm">
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2">
-                        <ShieldCheck className="h-5 w-5 text-[#47705d]" />{" "}
-                        Recommended next steps
-                      </CardTitle>
-                      <CardDescription>
-                        Practical controls for the case officer or finance team.
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                      <ul className="space-y-3 text-sm">
-                        {analysis.recommendations.map((recommendation) => (
-                          <li key={recommendation} className="flex gap-3">
-                            <Check className="mt-0.5 h-4 w-4 shrink-0 text-[#47705d]" />
-                            {recommendation}
-                          </li>
-                        ))}
-                      </ul>
-                    </CardContent>
-                  </Card>
-                </div>
-                <Card className="border-border/80 shadow-sm">
-                  <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-5">
-                    <CardTitle>Transaction register</CardTitle>
-                    <CardDescription>
-                      First 12 transactions shown for audit review. Export the
-                      complete register above.
-                    </CardDescription>
+
+                {/* SECTION 5: Audited Transaction Register with Category & Flags */}
+                <Card className="border-border/80 shadow-xs">
+                  <CardHeader className="border-b border-border/70 bg-[#fbfcfb] pb-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <CardTitle className="text-base">Audited Transaction Register</CardTitle>
+                        <CardDescription className="text-xs">
+                          Showing first 15 transactions with assigned merchant category and risk flags.
+                        </CardDescription>
+                      </div>
+                      <Button variant="outline" size="sm" onClick={exportTransactionsCsv} className="h-8 gap-1 text-xs">
+                        <Download className="h-3.5 w-3.5" /> Export All CSV ({statement?.rows?.length || 0})
+                      </Button>
+                    </div>
                   </CardHeader>
-                  <CardContent className="overflow-x-auto pt-6">
-                    <table className="w-full min-w-[680px] text-left text-sm">
+                  <CardContent className="overflow-x-auto pt-4">
+                    <table className="w-full min-w-[700px] text-left text-xs">
                       <thead>
-                        <tr className="border-b border-border text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                          {statement!.headers.map((header) => (
-                            <th
-                              key={header}
-                              className="px-3 pb-3 font-semibold"
-                            >
-                              {header}
-                            </th>
-                          ))}
+                        <tr className="border-b text-muted-foreground">
+                          <th className="pb-2 font-semibold">Date</th>
+                          <th className="pb-2 font-semibold">Description</th>
+                          <th className="pb-2 font-semibold">Category</th>
+                          <th className="pb-2 font-semibold text-right">Debit</th>
+                          <th className="pb-2 font-semibold text-right">Credit</th>
+                          <th className="pb-2 font-semibold text-right">Balance</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {statement!.rows.slice(0, 12).map((row, rowIndex) => (
-                          <tr
-                            key={rowIndex}
-                            className="border-b border-border/70 last:border-0"
-                          >
-                            {statement!.headers.map((_, cellIndex) => (
-                              <td
-                                key={cellIndex}
-                                className="px-3 py-3 font-mono text-xs"
-                              >
-                                {row[cellIndex] || (
-                                  <span className="text-muted-foreground">
-                                    -
-                                  </span>
-                                )}
-                              </td>
-                            ))}
+                        {analysis.transactions.slice(0, 15).map((tx) => (
+                          <tr key={tx.index} className="border-b last:border-0 font-mono hover:bg-slate-50/50">
+                            <td className="py-2">{tx.date}</td>
+                            <td className="py-2 max-w-[220px] truncate font-sans">
+                              {tx.description}
+                              {tx.riskFlag && (
+                                <span className="ml-1.5 inline-block rounded bg-rose-100 px-1 py-0.5 text-[10px] font-bold text-rose-800">
+                                  {tx.riskFlag}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2 font-sans">
+                              <Badge variant="outline" className="text-[10px]">
+                                {tx.category}
+                              </Badge>
+                            </td>
+                            <td className="py-2 text-right font-medium text-rose-600">
+                              {tx.debit > 0 ? formatMoney(tx.debit, currency) : "-"}
+                            </td>
+                            <td className="py-2 text-right font-medium text-emerald-700">
+                              {tx.credit > 0 ? formatMoney(tx.credit, currency) : "-"}
+                            </td>
+                            <td className="py-2 text-right font-bold">
+                              {tx.balance > 0 ? formatMoney(tx.balance, currency) : "-"}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -975,15 +2071,57 @@ export default function Home() {
             )}
           </div>
         </main>
-        <footer className="flex flex-col gap-2 px-2 pt-6 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+
+        {/* Footer */}
+        <footer className="mt-6 flex flex-col gap-2 px-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
           <span>
-            Mofdan Digitals · Statement intelligence for modern finance teams
+            Institutional Statement Intelligence · Designed for Credit Committees, Lenders, and Risk Teams
           </span>
           <span className="flex items-center gap-1.5">
-            <ShieldCheck className="h-3.5 w-3.5" /> Session-first processing
+            <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" /> Private in-browser session execution
           </span>
         </footer>
       </div>
+
+      {/* Credit Committee Memo Dialog */}
+      {analysis && (
+        <CreditMemoDialog
+          isOpen={isCreditMemoOpen}
+          onOpenChange={setIsCreditMemoOpen}
+          statement={statement}
+          underwriting={analysis.underwriting}
+          forensics={analysis.forensics}
+          currency={currency}
+          openingBalance={analysis.openingBalance}
+          closingBalance={analysis.closingBalance}
+          minimumBalance={analysis.minimumBalance}
+          maximumBalance={analysis.maximumBalance}
+          income={analysis.income}
+          outflow={analysis.outflow}
+          net={analysis.net}
+          periodLabel={analysis.periodLabel}
+          monthlyBreakdown={analysis.monthlyBreakdown}
+          weeklyBreakdown={analysis.weeklyBreakdown}
+        />
+      )}
+
+      {/* Admin Dashboard */}
+      <AdminDashboard
+        open={isAdminDashboardOpen}
+        onOpenChange={setIsAdminDashboardOpen}
+      />
+
+      {/* User Upload History */}
+      <UserHistoryDialog
+        open={isUserHistoryOpen}
+        onOpenChange={setIsUserHistoryOpen}
+      />
+
+      {/* Google Auth Modal */}
+      <AuthModal
+        open={isAuthModalOpen}
+        onOpenChange={setIsAuthModalOpen}
+      />
     </div>
   );
 }

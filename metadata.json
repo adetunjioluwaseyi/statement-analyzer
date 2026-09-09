@@ -1,0 +1,6 @@
+{
+  "name": "Statement Analyzer",
+  "description": "Turn bank statements into cash-flow, fraud, and lending decision signals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
